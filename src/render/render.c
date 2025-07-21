@@ -1,7 +1,8 @@
 #include "render.h"
+#include "resource.h"
 
-#include "app.h"
-#include "memory.h"
+#include "../system/app.h"
+#include "../system/memory.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -10,6 +11,60 @@
 #include <string.h>
 #include <vk_mem_alloc.h>
 #include <volk.h>
+
+typedef struct {
+	float viewMatrix[16];
+	float projMatrix[16];
+	float viewProjMatrix[16];
+	float frustumPlanes[24]; // 6 planes * 4 floats
+	uint32_t screenWidth;
+	uint32_t screenHeight;
+	uint32_t frameIndex;
+	uint32_t pad;
+} WC_GpuSceneData;
+
+typedef struct {
+	// Render passes
+	VkRenderPass visibilityPass;
+	VkRenderPass shadingPass;
+
+	// Pipelines
+	VkPipeline visibilityPipeline;
+	VkPipeline shadingPipeline;
+	VkPipelineLayout pipelineLayout;
+
+	// Visibility buffer (stores instanceID + triangleID)
+	VkImage visibilityImage;
+	VmaAllocation visibilityAllocation;
+	VkImageView visibilityView;
+
+	// Depth buffer
+	VkImage depthImage;
+	VmaAllocation depthAllocation;
+	VkImageView depthView;
+
+	// Scene data buffer
+	VkBuffer sceneDataBuffer;
+	VmaAllocation sceneDataAllocation;
+
+	// Command buffers
+	VkCommandBuffer commandBuffers[2]; // Double buffering
+
+	// Framebuffers
+	VkFramebuffer visibilityFramebuffer;
+	VkFramebuffer* shadingFramebuffers; // One per swapchain image
+
+	// Sync objects
+	VkSemaphore imageAvailableSemaphores[2];
+	VkSemaphore renderFinishedSemaphores[2];
+	VkFence inFlightFences[2];
+
+	uint32_t currentFrame;
+	VkExtent2D extent;
+
+	WC_GpuResources* bindlessResources;
+	VmaAllocator allocator;
+} WC_VisibilityBuffer;
 
 typedef struct WC_QueueFamilyIndices
 {

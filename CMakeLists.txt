@@ -62,6 +62,9 @@ add_executable(${PROJECT_NAME} src/main.c
         src/system/input.h
         src/game/game.c
         src/game/game.h
-        src/system/render.c
-        src/system/render.h)
+        src/render/render.c
+        src/render/render.h
+        src/render/resource.c
+        src/render/resource.h
+        src/render/types.h)
 target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Headers volk VulkanMemoryAllocator SDL3::SDL3 mimalloc-static)
