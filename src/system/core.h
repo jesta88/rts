@@ -1,6 +1,8 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdlib.h>
+#include <stdbool.h>
 
 #define WC_KB 1024
 #define WC_MB (WC_KB * WC_KB)

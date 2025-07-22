@@ -1,7 +1,9 @@
 #include "system/app.h"
 #include "game/game.h"
 
-int main(int argc, const char** argv)
+#include <SDL3/SDL_main.h>
+
+int main(int argc, char** argv)
 {
 	const WC_AppCallbacks callbacks = {
 		.init = wc_game_init,

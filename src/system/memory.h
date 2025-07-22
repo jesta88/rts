@@ -48,9 +48,9 @@ void wc_arena_reset(WC_Arena* arena);
 //-------------------------------------------------------------------------------------------------
 // Pool allocator
 
-typedef struct wc_pool_allocator wc_pool_allocator;
+typedef struct WC_Pool WC_Pool;
 
-wc_pool_allocator* wc_create_pool_allocator(size_t element_size, size_t element_count);
-void wc_destroy_pool_allocator(wc_pool_allocator* allocator);
-void* wc_pool_alloc(wc_pool_allocator* allocator);
-void wc_pool_free(wc_pool_allocator* allocator, void* memory);
+WC_Pool* wc_create_pool_allocator(size_t element_size, size_t element_count);
+void wc_destroy_pool_allocator(WC_Pool* allocator);
+void* wc_pool_alloc(WC_Pool* allocator);
+void wc_pool_free(WC_Pool* allocator, void* memory);

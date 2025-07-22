@@ -1,16 +1,17 @@
 #include "render.h"
-#include "allocator.h"
-#include "resource.h"
 
 #include "../system/app.h"
 #include "../system/memory.h"
+#include "allocator.h"
+#include "resource.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <stdio.h>
 #include <string.h>
 
-typedef struct {
+typedef struct
+{
 	float viewMatrix[16];
 	float projMatrix[16];
 	float viewProjMatrix[16];
@@ -21,7 +22,8 @@ typedef struct {
 	uint32_t pad;
 } WC_GpuSceneData;
 
-typedef struct {
+typedef struct
+{
 	// Render passes
 	VkRenderPass visibilityPass;
 	VkRenderPass shadingPass;
@@ -122,7 +124,8 @@ const int s_enable_validation = 1;
 
 // Required device extensions
 const char* s_device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_MESH_SHADER_EXTENSION_NAME,
-									 VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME};
+									 VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+									 VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
 
 int createInstance(void);
 int setupDebugMessenger(void);
@@ -144,7 +147,8 @@ void updateDescriptorSet(void);
 int createCommandPool(void);
 int createCommandBuffers(void);
 
-int createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, VkBuffer* buffer, VmaAllocation* allocation);
+int createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, VkBuffer* buffer,
+				 VmaAllocation* allocation);
 VkShaderModule loadShaderModule(VkDevice device, const char* filepath);
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -179,7 +183,8 @@ int wc_render_init(void)
 	allocator_create_info.device = device;
 	allocator_create_info.instance = s_instance;
 	allocator_create_info.vulkanApiVersion = VK_API_VERSION_1_4;
-	if (vmaCreateAllocator(&allocator_create_info, &allocator) != VK_SUCCESS) {
+	if (vmaCreateAllocator(&allocator_create_info, &allocator) != VK_SUCCESS)
+	{
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to create Vulkan memory allocator\n");
 		return EXIT_FAILURE;
 	}
@@ -205,11 +210,11 @@ void wc_render_draw(void)
 {
 	uint32_t imageIndex;
 	vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &imageIndex);
-	VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	VkSubmitInfo submitInfo = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &commandBuffers[imageIndex];
 	vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-	VkPresentInfoKHR presentInfo = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+	VkPresentInfoKHR presentInfo = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
 	presentInfo.swapchainCount = 1;
 	presentInfo.pSwapchains = &swapchain;
 	presentInfo.pImageIndices = &imageIndex;
@@ -231,7 +236,8 @@ void wc_render_quit(void)
 	vkFreeCommandBuffers(device, commandPool, swapchainImageCount, commandBuffers);
 	vkDestroyCommandPool(device, commandPool, NULL);
 
-	for (uint32_t i = 0; i < swapchainImageCount; i++) {
+	for (uint32_t i = 0; i < swapchainImageCount; i++)
+	{
 		vkDestroyFramebuffer(device, swapchainFramebuffers[i], NULL);
 		vkDestroyImageView(device, swapchainImageViews[i], NULL);
 	}
@@ -243,7 +249,8 @@ void wc_render_quit(void)
 	vkDestroySwapchainKHR(device, swapchain, NULL);
 	vmaDestroyAllocator(allocator);
 	vkDestroyDevice(device, NULL);
-	if (s_enable_validation) vkDestroyDebugUtilsMessengerEXT(s_instance, debugMessenger, NULL);
+	if (s_enable_validation)
+		vkDestroyDebugUtilsMessengerEXT(s_instance, debugMessenger, NULL);
 	vkDestroySurfaceKHR(s_instance, surface, NULL);
 	vkDestroyInstance(s_instance, NULL);
 }
@@ -541,179 +548,201 @@ static VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR capabilities)
 
 int createSwapchain(void)
 {
-    VkSurfaceCapabilitiesKHR caps;
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps);
+	VkSurfaceCapabilitiesKHR caps;
+	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps);
 
-    // Query drawable size for high-DPI
+	// Query drawable size for high-DPI
 	SDL_Window* window = wc_app_get_window_handle();
 	int width, height;
-    SDL_GetWindowSizeInPixels(window, &width, &height);
-    VkExtent2D actualExtent = { width, height };
-    if (caps.currentExtent.width != UINT32_MAX) actualExtent = caps.currentExtent;
-    else {
-        actualExtent.width = actualExtent.width < caps.minImageExtent.width ? caps.minImageExtent.width :
-                             (actualExtent.width > caps.maxImageExtent.width ? caps.maxImageExtent.width : actualExtent.width);
-        actualExtent.height = actualExtent.height < caps.minImageExtent.height ? caps.minImageExtent.height :
-                              (actualExtent.height > caps.maxImageExtent.height ? caps.maxImageExtent.height : actualExtent.height);
-    }
+	SDL_GetWindowSizeInPixels(window, &width, &height);
+	VkExtent2D actualExtent = {width, height};
+	if (caps.currentExtent.width != UINT32_MAX)
+		actualExtent = caps.currentExtent;
+	else
+	{
+		actualExtent.width =
+			actualExtent.width < caps.minImageExtent.width
+				? caps.minImageExtent.width
+				: (actualExtent.width > caps.maxImageExtent.width ? caps.maxImageExtent.width : actualExtent.width);
+		actualExtent.height =
+			actualExtent.height < caps.minImageExtent.height
+				? caps.minImageExtent.height
+				: (actualExtent.height > caps.maxImageExtent.height ? caps.maxImageExtent.height : actualExtent.height);
+	}
 	swapchainExtent = actualExtent;
 
-    uint32_t fmtCount, pmCount;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &fmtCount, NULL);
-    VkSurfaceFormatKHR* formats = wc_malloc(sizeof(VkSurfaceFormatKHR)*fmtCount);
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &fmtCount, formats);
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &pmCount, NULL);
-    VkPresentModeKHR* modes = wc_malloc(sizeof(VkPresentModeKHR)*pmCount);
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &pmCount, modes);
+	uint32_t fmtCount, pmCount;
+	vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &fmtCount, NULL);
+	VkSurfaceFormatKHR* formats = wc_malloc(sizeof(VkSurfaceFormatKHR) * fmtCount);
+	vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &fmtCount, formats);
+	vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &pmCount, NULL);
+	VkPresentModeKHR* modes = wc_malloc(sizeof(VkPresentModeKHR) * pmCount);
+	vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &pmCount, modes);
 
-    VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(formats, fmtCount);
-    VkPresentModeKHR presentMode = chooseSwapPresentMode(modes, pmCount);
-    wc_free(formats);
+	VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(formats, fmtCount);
+	VkPresentModeKHR presentMode = chooseSwapPresentMode(modes, pmCount);
+	wc_free(formats);
 	wc_free(modes);
 
-    uint32_t imgCount = caps.minImageCount + 1;
-    if (caps.maxImageCount > 0 && imgCount > caps.maxImageCount) imgCount = caps.maxImageCount;
+	uint32_t imgCount = caps.minImageCount + 1;
+	if (caps.maxImageCount > 0 && imgCount > caps.maxImageCount)
+		imgCount = caps.maxImageCount;
 
-    VkSwapchainCreateInfoKHR ci = { .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
-    ci.surface = surface;
-    ci.minImageCount = imgCount;
-    ci.imageFormat = surfaceFormat.format;
-    ci.imageColorSpace = surfaceFormat.colorSpace;
-    ci.imageExtent = swapchainExtent;
-    ci.imageArrayLayers = 1;
-    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    uint32_t qf[] = { graphicsQueueFamilyIndex, presentQueueFamilyIndex };
-    if (graphicsQueueFamilyIndex != presentQueueFamilyIndex) {
-        ci.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
-        ci.queueFamilyIndexCount = 2;
-        ci.pQueueFamilyIndices = qf;
-    } else ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    ci.preTransform = caps.currentTransform;
-    ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    ci.presentMode = presentMode;
-    ci.clipped = VK_TRUE;
-    ci.oldSwapchain = VK_NULL_HANDLE;
+	VkSwapchainCreateInfoKHR ci = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+	ci.surface = surface;
+	ci.minImageCount = imgCount;
+	ci.imageFormat = surfaceFormat.format;
+	ci.imageColorSpace = surfaceFormat.colorSpace;
+	ci.imageExtent = swapchainExtent;
+	ci.imageArrayLayers = 1;
+	ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	uint32_t qf[] = {graphicsQueueFamilyIndex, presentQueueFamilyIndex};
+	if (graphicsQueueFamilyIndex != presentQueueFamilyIndex)
+	{
+		ci.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+		ci.queueFamilyIndexCount = 2;
+		ci.pQueueFamilyIndices = qf;
+	}
+	else
+		ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	ci.preTransform = caps.currentTransform;
+	ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	ci.presentMode = presentMode;
+	ci.clipped = VK_TRUE;
+	ci.oldSwapchain = VK_NULL_HANDLE;
 
-    if (vkCreateSwapchainKHR(device, &ci, NULL, &swapchain) != VK_SUCCESS) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "swapchain creation failed\n");
-    	return EXIT_FAILURE;
-    }
+	if (vkCreateSwapchainKHR(device, &ci, NULL, &swapchain) != VK_SUCCESS)
+	{
+		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "swapchain creation failed\n");
+		return EXIT_FAILURE;
+	}
 
-    vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, NULL);
-    swapchainImages = wc_malloc(sizeof(VkImage)*swapchainImageCount);
-    vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages);
+	vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, NULL);
+	swapchainImages = wc_malloc(sizeof(VkImage) * swapchainImageCount);
+	vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages);
 	return EXIT_SUCCESS;
 }
 
-int createImageViews(void) {
-    swapchainImageViews = wc_malloc(sizeof(VkImageView)*swapchainImageCount);
-    for (uint32_t i = 0; i < swapchainImageCount; i++) {
-        VkImageViewCreateInfo info = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-        info.image = swapchainImages[i];
-        info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        info.format = VK_FORMAT_B8G8R8A8_SRGB;
-        info.components = (VkComponentMapping){ VK_COMPONENT_SWIZZLE_IDENTITY };
-        info.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        if (vkCreateImageView(device, &info, NULL, &swapchainImageViews[i]) != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "image view creation failed\n");
-        	return EXIT_FAILURE;
-        }
-    }
+int createImageViews(void)
+{
+	swapchainImageViews = wc_malloc(sizeof(VkImageView) * swapchainImageCount);
+	for (uint32_t i = 0; i < swapchainImageCount; i++)
+	{
+		VkImageViewCreateInfo info = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+		info.image = swapchainImages[i];
+		info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		info.format = VK_FORMAT_B8G8R8A8_SRGB;
+		info.components = (VkComponentMapping){VK_COMPONENT_SWIZZLE_IDENTITY};
+		info.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		if (vkCreateImageView(device, &info, NULL, &swapchainImageViews[i]) != VK_SUCCESS)
+		{
+			SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "image view creation failed\n");
+			return EXIT_FAILURE;
+		}
+	}
 	return EXIT_SUCCESS;
 }
 
-int createRenderPass(void) {
-    VkAttachmentDescription colorAttachment = {0};
-    colorAttachment.format = VK_FORMAT_B8G8R8A8_SRGB;
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+int createRenderPass(void)
+{
+	VkAttachmentDescription colorAttachment = {0};
+	colorAttachment.format = VK_FORMAT_B8G8R8A8_SRGB;
+	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-    VkAttachmentReference colorRef = {0};
-    colorRef.attachment = 0;
-    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	VkAttachmentReference colorRef = {0};
+	colorRef.attachment = 0;
+	colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    VkSubpassDescription subpass = {0};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorRef;
+	VkSubpassDescription subpass = {0};
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = 1;
+	subpass.pColorAttachments = &colorRef;
 
-    VkRenderPassCreateInfo rpInfo = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
-    rpInfo.attachmentCount = 1;
-    rpInfo.pAttachments = &colorAttachment;
-    rpInfo.subpassCount = 1;
-    rpInfo.pSubpasses = &subpass;
+	VkRenderPassCreateInfo rpInfo = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+	rpInfo.attachmentCount = 1;
+	rpInfo.pAttachments = &colorAttachment;
+	rpInfo.subpassCount = 1;
+	rpInfo.pSubpasses = &subpass;
 
-    if (vkCreateRenderPass(device, &rpInfo, NULL, &renderPass) != VK_SUCCESS) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "render pass creation failed\n");
-    	return EXIT_FAILURE;
-    }
+	if (vkCreateRenderPass(device, &rpInfo, NULL, &renderPass) != VK_SUCCESS)
+	{
+		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "render pass creation failed\n");
+		return EXIT_FAILURE;
+	}
 	return EXIT_SUCCESS;
 }
 
 int createFramebuffers(void)
 {
-    swapchainFramebuffers = wc_malloc(sizeof(VkFramebuffer)*swapchainImageCount);
-    for (uint32_t i = 0; i < swapchainImageCount; i++) {
-        VkImageView attachments[] = { swapchainImageViews[i] };
-        VkFramebufferCreateInfo fbInfo = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-        fbInfo.renderPass = renderPass;
-        fbInfo.attachmentCount = 1;
-        fbInfo.pAttachments = attachments;
-        fbInfo.width = swapchainExtent.width;
-        fbInfo.height = swapchainExtent.height;
-        fbInfo.layers = 1;
-        if (vkCreateFramebuffer(device, &fbInfo, NULL, &swapchainFramebuffers[i]) != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "framebuffer creation failed\n");
-        	return EXIT_FAILURE;
-        }
-    }
+	swapchainFramebuffers = wc_malloc(sizeof(VkFramebuffer) * swapchainImageCount);
+	for (uint32_t i = 0; i < swapchainImageCount; i++)
+	{
+		VkImageView attachments[] = {swapchainImageViews[i]};
+		VkFramebufferCreateInfo fbInfo = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+		fbInfo.renderPass = renderPass;
+		fbInfo.attachmentCount = 1;
+		fbInfo.pAttachments = attachments;
+		fbInfo.width = swapchainExtent.width;
+		fbInfo.height = swapchainExtent.height;
+		fbInfo.layers = 1;
+		if (vkCreateFramebuffer(device, &fbInfo, NULL, &swapchainFramebuffers[i]) != VK_SUCCESS)
+		{
+			SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "framebuffer creation failed\n");
+			return EXIT_FAILURE;
+		}
+	}
 	return EXIT_SUCCESS;
 }
 
 int createCommandPool(void)
 {
-    VkCommandPoolCreateInfo poolInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    poolInfo.queueFamilyIndex = graphicsQueueFamilyIndex;
-    if (vkCreateCommandPool(device, &poolInfo, NULL, &commandPool) != VK_SUCCESS) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "command pool creation failed\n");
-    	return EXIT_FAILURE;
-    }
+	VkCommandPoolCreateInfo poolInfo = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+	poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+	poolInfo.queueFamilyIndex = graphicsQueueFamilyIndex;
+	if (vkCreateCommandPool(device, &poolInfo, NULL, &commandPool) != VK_SUCCESS)
+	{
+		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "command pool creation failed\n");
+		return EXIT_FAILURE;
+	}
 	return EXIT_SUCCESS;
 }
 
 int createCommandBuffers(void)
 {
-    commandBuffers = wc_malloc(sizeof(VkCommandBuffer)*swapchainImageCount);
-    VkCommandBufferAllocateInfo allocInfo = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    allocInfo.commandPool = commandPool;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = swapchainImageCount;
-    if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers) != VK_SUCCESS) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "command buffer allocation failed\n");
-    	return EXIT_FAILURE;
-    }
+	commandBuffers = wc_malloc(sizeof(VkCommandBuffer) * swapchainImageCount);
+	VkCommandBufferAllocateInfo allocInfo = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+	allocInfo.commandPool = commandPool;
+	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocInfo.commandBufferCount = swapchainImageCount;
+	if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers) != VK_SUCCESS)
+	{
+		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "command buffer allocation failed\n");
+		return EXIT_FAILURE;
+	}
 
-	for (uint32_t i = 0; i < swapchainImageCount; i++) {
-		VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+	for (uint32_t i = 0; i < swapchainImageCount; i++)
+	{
+		VkCommandBufferBeginInfo beginInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 		vkBeginCommandBuffer(commandBuffers[i], &beginInfo);
 
-		VkRenderPassBeginInfo rpBegin = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+		VkRenderPassBeginInfo rpBegin = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
 		rpBegin.renderPass = renderPass;
 		rpBegin.framebuffer = swapchainFramebuffers[i];
 		rpBegin.renderArea.extent = swapchainExtent;
-		VkClearValue clear = { .color = {{0.1f,0.1f,0.1f,1.0f}} };
+		VkClearValue clear = {.color = {{0.1f, 0.1f, 0.1f, 1.0f}}};
 		rpBegin.clearValueCount = 1;
 		rpBegin.pClearValues = &clear;
 		vkCmdBeginRenderPass(commandBuffers[i], &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
 		vkCmdBindPipeline(commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
-		vkCmdBindDescriptorSets(commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
+		vkCmdBindDescriptorSets(commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0,
+								NULL);
 		vkCmdDrawMeshTasksEXT(commandBuffers[i], 100, 1, 1);
 
 		vkCmdEndRenderPass(commandBuffers[i]);
@@ -723,14 +752,17 @@ int createCommandBuffers(void)
 	return EXIT_SUCCESS;
 }
 
-int createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, VkBuffer* buffer, VmaAllocation* allocation) {
-	VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+int createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, VkBuffer* buffer,
+				 VmaAllocation* allocation)
+{
+	VkBufferCreateInfo bufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
 	bufferInfo.size = size;
 	bufferInfo.usage = usage;
 	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	VmaAllocationCreateInfo allocCreateInfo = {};
 	allocCreateInfo.usage = memoryUsage;
-	if (vmaCreateBuffer(allocator, &bufferInfo, &allocCreateInfo, buffer, allocation, NULL) != VK_SUCCESS) {
+	if (vmaCreateBuffer(allocator, &bufferInfo, &allocCreateInfo, buffer, allocation, NULL) != VK_SUCCESS)
+	{
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to allocate buffer\n");
 		return EXIT_FAILURE;
 	}
@@ -740,111 +772,118 @@ int createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage mem
 // --- Descriptor + Pipeline setup ---
 void createDescriptorSetLayout(void)
 {
-    VkDescriptorSetLayoutBinding bindings[2] = {};
-    // transforms
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
-    // visibility
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
+	VkDescriptorSetLayoutBinding bindings[2] = {};
+	// transforms
+	bindings[0].binding = 0;
+	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[0].descriptorCount = 1;
+	bindings[0].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
+	// visibility
+	bindings[1].binding = 1;
+	bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[1].descriptorCount = 1;
+	bindings[1].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
 
-    VkDescriptorSetLayoutCreateInfo layoutInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    layoutInfo.bindingCount = 2;
-    layoutInfo.pBindings = bindings;
-    vkCreateDescriptorSetLayout(device, &layoutInfo, NULL, &descriptorSetLayout);
+	VkDescriptorSetLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+	layoutInfo.bindingCount = 2;
+	layoutInfo.pBindings = bindings;
+	vkCreateDescriptorSetLayout(device, &layoutInfo, NULL, &descriptorSetLayout);
 }
 
-void createPipeline(void) {
-    // Load mesh and fragment shaders (SPIR-V) -- assume functions loadShaderModule()
-    VkShaderModule meshSM = loadShaderModule(device, "mesh.spv");
-    VkShaderModule fragSM = loadShaderModule(device, "frag.spv");
+void createPipeline(void)
+{
+	// Load mesh and fragment shaders (SPIR-V) -- assume functions loadShaderModule()
+	VkShaderModule meshSM = loadShaderModule(device, "mesh.spv");
+	VkShaderModule fragSM = loadShaderModule(device, "frag.spv");
 
-    VkPipelineShaderStageCreateInfo stages[2] = {};
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_MESH_BIT_EXT;
-    stages[0].module = meshSM;
-    stages[0].pName = "main";
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = fragSM;
-    stages[1].pName = "main";
+	VkPipelineShaderStageCreateInfo stages[2] = {};
+	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[0].stage = VK_SHADER_STAGE_MESH_BIT_EXT;
+	stages[0].module = meshSM;
+	stages[0].pName = "main";
+	stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	stages[1].module = fragSM;
+	stages[1].pName = "main";
 
-    VkPipelineLayoutCreateInfo layoutInfo = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    layoutInfo.setLayoutCount = 1;
-    layoutInfo.pSetLayouts = &descriptorSetLayout;
-    vkCreatePipelineLayout(device, &layoutInfo, NULL, &pipelineLayout);
+	VkPipelineLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+	layoutInfo.setLayoutCount = 1;
+	layoutInfo.pSetLayouts = &descriptorSetLayout;
+	vkCreatePipelineLayout(device, &layoutInfo, NULL, &pipelineLayout);
 
-    VkGraphicsPipelineCreateInfo pipeInfo = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-    pipeInfo.stageCount = 2;
-    pipeInfo.pStages = stages;
-    pipeInfo.renderPass = renderPass;
-    pipeInfo.layout = pipelineLayout;
-    // other pipeline state (viewport, raster, blend) omitted for brevity
-    vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeInfo, NULL, &meshPipeline);
+	VkGraphicsPipelineCreateInfo pipeInfo = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+	pipeInfo.stageCount = 2;
+	pipeInfo.pStages = stages;
+	pipeInfo.renderPass = renderPass;
+	pipeInfo.layout = pipelineLayout;
+	// other pipeline state (viewport, raster, blend) omitted for brevity
+	vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeInfo, NULL, &meshPipeline);
 
-    vkDestroyShaderModule(device, meshSM, NULL);
-    vkDestroyShaderModule(device, fragSM, NULL);
+	vkDestroyShaderModule(device, meshSM, NULL);
+	vkDestroyShaderModule(device, fragSM, NULL);
 }
 
-void createDescriptorPool(void) {
-    VkDescriptorPoolSize sizes[2] = {};
-    sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[0].descriptorCount = 1;
-    sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    sizes[1].descriptorCount = 1;
+void createDescriptorPool(void)
+{
+	VkDescriptorPoolSize sizes[2] = {};
+	sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	sizes[0].descriptorCount = 1;
+	sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	sizes[1].descriptorCount = 1;
 
-    VkDescriptorPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    poolInfo.maxSets = 1;
-    poolInfo.poolSizeCount = 2;
-    poolInfo.pPoolSizes = sizes;
-    vkCreateDescriptorPool(device, &poolInfo, NULL, &descriptorPool);
+	VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+	poolInfo.maxSets = 1;
+	poolInfo.poolSizeCount = 2;
+	poolInfo.pPoolSizes = sizes;
+	vkCreateDescriptorPool(device, &poolInfo, NULL, &descriptorPool);
 }
 
-void createDescriptorSet(void) {
-    VkDescriptorSetAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-    allocInfo.descriptorPool = descriptorPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &descriptorSetLayout;
-    vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet);
+void createDescriptorSet(void)
+{
+	VkDescriptorSetAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+	allocInfo.descriptorPool = descriptorPool;
+	allocInfo.descriptorSetCount = 1;
+	allocInfo.pSetLayouts = &descriptorSetLayout;
+	vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet);
 }
 
-void updateDescriptorSet(void) {
-    createBuffer(sizeof(float)*16*100, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, &transformBuffer, &transformAlloc);
-    createBuffer(sizeof(uint32_t)*100, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, &visibilityBuffer, &visibilityAlloc);
+void updateDescriptorSet(void)
+{
+	createBuffer(sizeof(float) * 16 * 100, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, &transformBuffer,
+				 &transformAlloc);
+	createBuffer(sizeof(uint32_t) * 100, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, &visibilityBuffer,
+				 &visibilityAlloc);
 
-    VkDescriptorBufferInfo bufInfos[2] = {};
-    bufInfos[0].buffer = transformBuffer;
-    bufInfos[0].offset = 0;
-    bufInfos[0].range = VK_WHOLE_SIZE;
-    bufInfos[1].buffer = visibilityBuffer;
-    bufInfos[1].offset = 0;
-    bufInfos[1].range = VK_WHOLE_SIZE;
+	VkDescriptorBufferInfo bufInfos[2] = {};
+	bufInfos[0].buffer = transformBuffer;
+	bufInfos[0].offset = 0;
+	bufInfos[0].range = VK_WHOLE_SIZE;
+	bufInfos[1].buffer = visibilityBuffer;
+	bufInfos[1].offset = 0;
+	bufInfos[1].range = VK_WHOLE_SIZE;
 
-    VkWriteDescriptorSet writes[2] = {};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = descriptorSet;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[0].pBufferInfo = &bufInfos[0];
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = descriptorSet;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[1].pBufferInfo = &bufInfos[1];
+	VkWriteDescriptorSet writes[2] = {};
+	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[0].dstSet = descriptorSet;
+	writes[0].dstBinding = 0;
+	writes[0].descriptorCount = 1;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[0].pBufferInfo = &bufInfos[0];
+	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[1].dstSet = descriptorSet;
+	writes[1].dstBinding = 1;
+	writes[1].descriptorCount = 1;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[1].pBufferInfo = &bufInfos[1];
 
-    vkUpdateDescriptorSets(device, 2, writes, 0, NULL);
+	vkUpdateDescriptorSets(device, 2, writes, 0, NULL);
 }
 
 VkShaderModule loadShaderModule(VkDevice device, const char* filepath)
 {
 	FILE* file = fopen(filepath, "rb");
-	if (!file) {
+	if (!file)
+	{
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to open shader file: %s", filepath);
 		return VK_NULL_HANDLE;
 	}
@@ -852,23 +891,26 @@ VkShaderModule loadShaderModule(VkDevice device, const char* filepath)
 	long size = ftell(file);
 	rewind(file);
 	// Size must be a multiple of 4
-	if (size % 4 != 0) {
+	if (size % 4 != 0)
+	{
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Shader file size not aligned: %s", filepath);
 		return VK_NULL_HANDLE;
 	}
 	char* code = wc_malloc(size);
-	if (fread(code, 1, size, file) != size) {
+	if (fread(code, 1, size, file) != size)
+	{
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to read shader file: %s", filepath);
 		return VK_NULL_HANDLE;
 	}
 	fclose(file);
 
-	VkShaderModuleCreateInfo createInfo = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+	VkShaderModuleCreateInfo createInfo = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
 	createInfo.codeSize = size;
 	createInfo.pCode = (const uint32_t*)code;
 
 	VkShaderModule shaderModule;
-	if (vkCreateShaderModule(device, &createInfo, NULL, &shaderModule) != VK_SUCCESS) {
+	if (vkCreateShaderModule(device, &createInfo, NULL, &shaderModule) != VK_SUCCESS)
+	{
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to create shader module from file: %s", filepath);
 		return VK_NULL_HANDLE;
 	}

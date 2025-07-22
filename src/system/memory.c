@@ -177,7 +177,7 @@ typedef struct wc_memory_block
 	struct wc_memory_block* next;
 } wc_memory_block;
 
-struct wc_pool_allocator
+struct WC_Pool
 {
 	size_t element_size;
 	size_t block_size;
@@ -187,14 +187,14 @@ struct wc_pool_allocator
 	size_t element_count_per_block;
 };
 
-wc_pool_allocator* wc_create_pool_allocator(size_t element_size, const size_t element_count)
+WC_Pool* wc_create_pool_allocator(size_t element_size, const size_t element_count)
 {
 	const size_t default_alignment = 16;
 	element_size = element_size > sizeof(void*) ? element_size : sizeof(void*);
 	element_size = WC_ALIGN_FORWARD(element_size, default_alignment);
 	const size_t block_size = element_size * element_count;
 
-	wc_pool_allocator* pool = wc_aligned_alloc(sizeof(wc_pool_allocator), default_alignment);
+	WC_Pool* pool = wc_aligned_alloc(sizeof(WC_Pool), default_alignment);
 	pool->element_size = element_size;
 	pool->block_size = block_size;
 	pool->alignment = default_alignment;
@@ -219,7 +219,7 @@ wc_pool_allocator* wc_create_pool_allocator(size_t element_size, const size_t el
 	return pool;
 }
 
-void wc_destroy_pool_allocator(wc_pool_allocator* allocator)
+void wc_destroy_pool_allocator(WC_Pool* allocator)
 {
 	wc_memory_block* block = allocator->blocks;
 	while (block)
@@ -232,7 +232,7 @@ void wc_destroy_pool_allocator(wc_pool_allocator* allocator)
 	wc_aligned_free(allocator, allocator->alignment);
 }
 
-void* wc_pool_alloc(wc_pool_allocator* allocator)
+void* wc_pool_alloc(WC_Pool* allocator)
 {
 	// Try to allocate from the free list first.
 	if (allocator->free_list)
@@ -260,7 +260,7 @@ void* wc_pool_alloc(wc_pool_allocator* allocator)
 	return wc_pool_alloc(allocator);
 }
 
-void wc_pool_free(wc_pool_allocator* allocator, void* memory)
+void wc_pool_free(WC_Pool* allocator, void* memory)
 {
 	*(void**)memory = allocator->free_list;
 	allocator->free_list = memory;

@@ -16,29 +16,6 @@ message(STATUS "* Trace: ${WC_TRACE}")
 message(STATUS "* Link time optimization: ${WC_LTO}")
 message(STATUS "* Sanitize: ${WC_SANITIZE}")
 
-if(WC_SANITIZE)
-    if(MSVC)
-        add_compile_options("$<$<CONFIG:Debug>:/fsanitize=address>")
-        add_link_options("$<$<CONFIG:Debug>:/INCREMENTAL:NO>")
-    elseif(APPLE)
-        add_compile_options(-fsanitize=address -fsanitize-address-use-after-scope -fsanitize=undefined)
-        add_link_options(-fsanitize=address -fsanitize-address-use-after-scope -fsanitize=undefined)
-    endif()
-endif()
-
-if(MSVC)
-    add_compile_options(/permissive- /W3 /WX /Oi /TC /std:clatest /experimental:c11atomics /zi /Zo /FS /utf-8 /GS- /fp:fast /arch:AVX2)
-    add_link_options(/INCREMENTAL:NO /OPT:REF,ICF /SUBSYSTEM:WINDOWS)
-    add_compile_definitions(WC_WINDOWS WC_MSVC _CRT_SECURE_NO_WARNINGS)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
-
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_compile_definitions(WC_DEBUG=1)
-endif()
-
 include(cmake/FetchSDL3.cmake)
 include(cmake/FetchMimalloc.cmake)
 include(cmake/FetchVMA.cmake)
@@ -47,7 +24,9 @@ include(cmake/FetchVolk.cmake)
 
 add_library(vma STATIC
         src/render/allocator.cpp
-        src/render/allocator.h)
+        src/render/allocator.h
+        src/render/shader.c
+        src/render/shader.h)
 target_link_libraries(vma PUBLIC volk VulkanMemoryAllocator)
 
 add_executable(${PROJECT_NAME} src/main.c
@@ -71,7 +50,36 @@ add_executable(${PROJECT_NAME} src/main.c
         src/render/render.h
         src/render/resource.c
         src/render/resource.h
-        src/render/types.h)
+        src/render/types.h
+        src/system/task.c
+        src/system/task.h
+        src/system/thread_pool.c
+        src/system/thread_pool.h
+        src/system/deque.c
+        src/system/deque.h
+        src/system/atomic.c
+        src/system/atomic.h)
+
+if(WC_SANITIZE)
+    if(MSVC)
+        target_compile_options(${PROJECT_NAME} "$<$<CONFIG:Debug>:/fsanitize=address>")
+        target_link_options(${PROJECT_NAME} "$<$<CONFIG:Debug>:/INCREMENTAL:NO>")
+    endif()
+endif()
+
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE /permissive- /W3 /WX /Oi /TC /std:clatest /Zi /Zo /FS /utf-8 /GS- /fp:fast /arch:AVX2)
+    target_link_options(${PROJECT_NAME} PRIVATE /INCREMENTAL:NO /OPT:REF,ICF /SUBSYSTEM:WINDOWS)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE WC_WINDOWS WC_MSVC _CRT_SECURE_NO_WARNINGS)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+else()
+    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE WC_DEBUG=1)
+endif()
+
 target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Headers volk vma SDL3::SDL3 mimalloc-static)
 
 # Shader compiling
