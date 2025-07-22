@@ -1,4 +1,5 @@
 #include "render.h"
+#include "allocator.h"
 #include "resource.h"
 
 #include "../system/app.h"
@@ -6,11 +7,8 @@
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
-#define VK_NO_PROTOTYPES
 #include <stdio.h>
 #include <string.h>
-#include <vk_mem_alloc.h>
-#include <volk.h>
 
 typedef struct {
 	float viewMatrix[16];

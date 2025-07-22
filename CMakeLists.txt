@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.31)
-project(warcry C)
+project(warcry C CXX)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
@@ -45,6 +45,11 @@ include(cmake/FetchVMA.cmake)
 include(cmake/FetchVulkan.cmake)
 include(cmake/FetchVolk.cmake)
 
+add_library(vma STATIC
+        src/render/allocator.cpp
+        src/render/allocator.h)
+target_link_libraries(vma PUBLIC volk VulkanMemoryAllocator)
+
 add_executable(${PROJECT_NAME} src/main.c
         src/system/math.c
         src/system/math.h
@@ -67,4 +72,22 @@ add_executable(${PROJECT_NAME} src/main.c
         src/render/resource.c
         src/render/resource.h
         src/render/types.h)
-target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Headers volk VulkanMemoryAllocator SDL3::SDL3 mimalloc-static)
+target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Headers volk vma SDL3::SDL3 mimalloc-static)
+
+# Shader compiling
+include(cmake/CompileShaders.cmake)
+
+add_shaders_directory(${PROJECT_NAME} ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders)
+
+create_shader_target()
+
+add_dependencies(${PROJECT_NAME} compile_shaders)
+
+if(SPIRV_BINARY_FILES)
+    message(STATUS "Shaders to be compiled:")
+    foreach(shader ${SPIRV_BINARY_FILES})
+        message(STATUS "  ${shader}")
+    endforeach()
+else()
+    message(STATUS "No shaders found to compile")
+endif()
