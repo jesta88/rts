@@ -7,9 +7,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Forward declarations
 typedef struct WC_WorkerThread WC_WorkerThread;
 typedef struct WC_WorkStealingPool WC_WorkStealingPool;
 typedef struct WC_Task WC_Task;
+typedef struct WC_Arena WC_Arena;
 
 typedef struct WC_LoadBalanceStats {
     uint32_t worker_id;
@@ -114,4 +116,4 @@ WC_PoolConfig wc_pool_get_config(const WC_WorkStealingPool* pool);
 
 WC_WorkStealingPool* wc_get_global_pool(void);
 int wc_init_global_pool(void);
-void wc_shutdown_global_pool(void);#pragma once
+void wc_shutdown_global_pool(void);

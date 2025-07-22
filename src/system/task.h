@@ -10,6 +10,7 @@
 // Forward declarations - no complex includes needed
 typedef struct WC_Task WC_Task;
 typedef struct WC_TaskGroup WC_TaskGroup;
+typedef struct WC_Arena WC_Arena;
 
 typedef enum WC_TaskState {
     WC_TASK_PENDING,      // Waiting for dependencies
@@ -92,6 +93,7 @@ int wc_task_group_add(WC_TaskGroup* group, WC_Task* task);
 void wc_task_group_set_continuation(WC_TaskGroup* group, WC_Task* continuation);
 void wc_task_group_wait(WC_TaskGroup* group);
 int wc_task_group_submit(WC_TaskGroup* group);
+WC_Arena* wc_task_group_get_arena(WC_TaskGroup* group);
 
 //-------------------------------------------------------------------------------------------------
 // Hierarchical tasks
@@ -114,6 +116,30 @@ void wc_task_yield(void);
 WC_TaskState wc_task_get_state(const WC_Task* task);
 uint32_t wc_task_get_priority(const WC_Task* task);
 void wc_task_set_priority(WC_Task* task, uint32_t priority);
+
+//-------------------------------------------------------------------------------------------------
+// Task accessors for thread pool
+//-------------------------------------------------------------------------------------------------
+
+// Get task function and data
+WC_TaskFunction wc_task_get_function(const WC_Task* task);
+void* wc_task_get_data(const WC_Task* task);
+
+// Task timing setters
+void wc_task_set_started_time(WC_Task* task, uint64_t time);
+void wc_task_set_completed_time(WC_Task* task, uint64_t time);
+void wc_task_set_worker_id(WC_Task* task, uint32_t worker_id);
+
+// Task timing getters
+uint64_t wc_task_get_started_time(const WC_Task* task);
+uint64_t wc_task_get_completed_time(const WC_Task* task);
+
+// Task state management
+void wc_task_set_state(WC_Task* task, WC_TaskState state);
+
+// Task arena management
+void wc_task_set_arena(WC_Task* task, WC_Arena* arena);
+WC_Arena* wc_task_get_arena(const WC_Task* task);
 
 //-------------------------------------------------------------------------------------------------
 // Performance monitoring

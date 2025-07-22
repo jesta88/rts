@@ -350,6 +350,12 @@ int wc_task_group_add(WC_TaskGroup* group, WC_Task* task) {
     return 0;
 }
 
+WC_Arena* wc_task_group_get_arena(WC_TaskGroup* group)
+{
+	WC_ASSERT(group);
+	return group->group_arena;
+}
+
 //-------------------------------------------------------------------------------------------------
 // Task utilities and getters
 //-------------------------------------------------------------------------------------------------
@@ -508,4 +514,68 @@ WC_TaskStats wc_task_get_stats(void) {
 
 void wc_task_reset_stats(void) {
     // No-op for now
+}
+
+//-------------------------------------------------------------------------------------------------
+// Task accessors for thread pool
+//-------------------------------------------------------------------------------------------------
+
+WC_TaskFunction wc_task_get_function(const WC_Task* task) {
+	WC_ASSERT(task);
+	const struct WC_Task* impl = task;
+	return impl->function;
+}
+
+void* wc_task_get_data(const WC_Task* task) {
+	WC_ASSERT(task);
+	const struct WC_Task* impl = task;
+	return impl->data;
+}
+
+void wc_task_set_started_time(WC_Task* task, uint64_t time) {
+	WC_ASSERT(task);
+	struct WC_Task* impl = task;
+	impl->started_time = time;
+}
+
+void wc_task_set_completed_time(WC_Task* task, uint64_t time) {
+	WC_ASSERT(task);
+	struct WC_Task* impl = task;
+	impl->completed_time = time;
+}
+
+void wc_task_set_worker_id(WC_Task* task, uint32_t worker_id) {
+	WC_ASSERT(task);
+	struct WC_Task* impl = task;
+	impl->worker_id = worker_id;
+}
+
+uint64_t wc_task_get_started_time(const WC_Task* task) {
+	WC_ASSERT(task);
+	const struct WC_Task* impl = task;
+	return impl->started_time;
+}
+
+uint64_t wc_task_get_completed_time(const WC_Task* task) {
+	WC_ASSERT(task);
+	const struct WC_Task* impl = task;
+	return impl->completed_time;
+}
+
+void wc_task_set_state(WC_Task* task, WC_TaskState state) {
+	WC_ASSERT(task);
+	struct WC_Task* impl = task;
+	wc_atomic_u64_store(impl->state, (uint64_t)state);
+}
+
+void wc_task_set_arena(WC_Task* task, WC_Arena* arena) {
+	WC_ASSERT(task);
+	struct WC_Task* impl = task;
+	impl->arena = arena;
+}
+
+WC_Arena* wc_task_get_arena(const WC_Task* task) {
+	WC_ASSERT(task);
+	const struct WC_Task* impl = task;
+	return impl->arena;
 }
