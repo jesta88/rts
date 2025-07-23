@@ -117,3 +117,5 @@ WC_PoolConfig wc_pool_get_config(const WC_WorkStealingPool* pool);
 WC_WorkStealingPool* wc_get_global_pool(void);
 int wc_init_global_pool(void);
 void wc_shutdown_global_pool(void);
+
+void wc_debug_thread_pool_creation(void);

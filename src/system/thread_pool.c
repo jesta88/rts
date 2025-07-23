@@ -56,6 +56,7 @@ struct WC_WorkStealingPool {
     // Workers
     WC_WorkerThread* workers;
     uint32_t worker_count;
+    uint32_t actual_worker_threads;
 
     // Global queues
     WC_Deque* global_queue;
@@ -112,7 +113,6 @@ static WC_NumaTopology* g_numa_topology = NULL;
 //-------------------------------------------------------------------------------------------------
 
 static SDL_TLSID tls_current_worker;
-static bool tls_initialized = false;
 
 //-------------------------------------------------------------------------------------------------
 // Global pool instance
@@ -158,7 +158,7 @@ static void wc_pin_thread_to_core(uint32_t core_id) {
 static void wc_pool_worker_sleep(WC_WorkerThread* worker);
 static bool wc_pool_init_numa_topology(WC_WorkStealingPool* pool);
 static uint32_t wc_pool_select_numa_victim(WC_WorkerThread* thief);
-static WC_Task* wc_pool_steal_work_numa_aware(WC_WorkerThread* thief);
+static WC_Task* wc_pool_steal_work(WC_WorkerThread* thief);
 
 //-------------------------------------------------------------------------------------------------
 // Worker thread main loop
@@ -194,7 +194,7 @@ static int worker_thread_main(void* arg) {
             idle_spins = 0;
         } else {
             // Phase 2: Try to steal work from other workers
-            task = wc_pool_steal_work_numa_aware(worker);
+            task = wc_pool_steal_work(worker);
             if (task) {
                 idle_spins = 0;
             } else {
@@ -292,16 +292,13 @@ WC_WorkStealingPool* wc_pool_create(uint32_t worker_count) {
     }
 
     // Allocate worker array (+1 for main thread at index 0)
-    pool->worker_count = worker_count + 1;
+	pool->worker_count = worker_count + 1;  // Total slots allocated
+	pool->actual_worker_threads = worker_count;  // Actual worker threads created
+
     pool->workers = wc_aligned_alloc(pool->worker_count * sizeof(WC_WorkerThread), 64);
     if (!pool->workers) {
         wc_pool_destroy(pool);
         return NULL;
-    }
-
-    // Initialize thread-local storage for workers
-    if (!tls_initialized) {
-        tls_initialized = true;
     }
 
     // Initialize workers
@@ -313,7 +310,8 @@ WC_WorkStealingPool* wc_pool_create(uint32_t worker_count) {
         worker->pool = pool;
         worker->active = wc_atomic_bool_create(false);
 
-        if (!worker->active) {
+    	if (!worker->active) {
+    		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,"Failed to create atomic bool for worker %u", i);
             wc_pool_destroy(pool);
             return NULL;
         }
@@ -321,6 +319,7 @@ WC_WorkStealingPool* wc_pool_create(uint32_t worker_count) {
         // Initialize local queue
         worker->local_queue = wc_deque_create(256);
         if (!worker->local_queue) {
+        	SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,"Failed to create deque for worker %u", i);
             wc_pool_destroy(pool);
             return NULL;
         }
@@ -328,6 +327,7 @@ WC_WorkStealingPool* wc_pool_create(uint32_t worker_count) {
         // Create thread arena
         worker->thread_arena = wc_malloc(sizeof(WC_Arena));
         if (!worker->thread_arena || wc_arena_init(worker->thread_arena, 64 * 1024) != 0) {
+        	SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to create arena for worker %u", i);
             wc_pool_destroy(pool);
             return NULL;
         }
@@ -339,9 +339,13 @@ WC_WorkStealingPool* wc_pool_create(uint32_t worker_count) {
 
             worker->handle = SDL_CreateThread(worker_thread_main, thread_name, worker);
             if (!worker->handle) {
+            	SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,"Failed to create thread for worker %u", i);
                 wc_pool_destroy(pool);
                 return NULL;
             }
+        	SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,"Created worker thread %u", i);
+        } else {
+        	SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,"Worker 0 reserved for main thread");
         }
     }
 
@@ -352,6 +356,9 @@ WC_WorkStealingPool* wc_pool_create(uint32_t worker_count) {
     if (pool->enable_numa_awareness) {
         wc_pool_init_numa_topology(pool);
     }
+
+	SDL_Log("Thread pool created: %u total workers (%u threads + main)",
+			pool->worker_count, pool->actual_worker_threads);
 
     return pool;
 }
@@ -815,25 +822,45 @@ static bool wc_pool_init_numa_topology(WC_WorkStealingPool* pool) {
 
 // Core random victim selection (non-recursive)
 static uint32_t wc_pool_select_random_victim(WC_WorkerThread* thief) {
-    WC_ASSERT(thief);
-    WC_WorkStealingPool* pool = thief->pool;
+	WC_ASSERT(thief);
+	WC_WorkStealingPool* pool = thief->pool;
 
-    if (pool->worker_count <= 1) {
-        return thief->thread_id; // No other workers to steal from
-    }
+	if (pool->worker_count <= 1) {
+		SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,"Only one worker, returning self");
+		return thief->thread_id;
+	}
 
-    // Generate random victim different from ourselves
-    uint32_t victim_id;
-    do {
-        victim_id = wc_random_next(&thief->random_state) % pool->worker_count;
-    } while (victim_id == thief->thread_id);
+	uint32_t attempts = 0;
+	uint32_t max_attempts = pool->worker_count * 2; // Prevent infinite loops
 
-    return victim_id;
+	while (attempts < max_attempts) {
+		uint32_t victim_id = wc_random_next(&thief->random_state) % pool->worker_count;
+
+		// Skip ourselves
+		if (victim_id == thief->thread_id) {
+			attempts++;
+			continue;
+		}
+
+		WC_WorkerThread* victim = &pool->workers[victim_id];
+		if (!victim->local_queue) {
+			SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,"Worker %u has no deque, skipping (thief: %u)",
+					   victim_id, thief->thread_id);
+			attempts++;
+			continue;
+		}
+
+		SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,"Selected victim %u for thief %u", victim_id, thief->thread_id);
+		return victim_id;
+	}
+
+	SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,"Failed to find valid victim after %u attempts, returning self", max_attempts);
+	return thief->thread_id;
 }
 
 // NUMA-aware victim selection with three-tier strategy
 static uint32_t wc_pool_select_numa_victim(WC_WorkerThread* thief) {
-    WC_ASSERT(thief);
+	WC_ASSERT(thief);
 
     if (!g_numa_topology || !g_numa_topology->topology_valid) {
         return wc_pool_select_random_victim(thief);
@@ -843,79 +870,70 @@ static uint32_t wc_pool_select_numa_victim(WC_WorkerThread* thief) {
     WC_NumaNode* local_node = &g_numa_topology->nodes[thief_node];
     uint32_t random_val = wc_random_next(&thief->random_state) % 100;
 
-    // Tier 1: Local NUMA node (70% probability)
-    // Prioritize same-node stealing for best cache locality
+    // Try local NUMA node first (70% probability)
     if (local_node->worker_count > 1 && random_val < 70) {
-        uint32_t local_victim_idx;
-        uint32_t attempts = 0;
-        do {
-            local_victim_idx = wc_random_next(&thief->random_state) % local_node->worker_count;
-            attempts++;
-        } while (local_node->worker_ids[local_victim_idx] == thief->thread_id &&
-                 attempts < local_node->worker_count);
+        for (uint32_t attempt = 0; attempt < local_node->worker_count; attempt++) {
+            uint32_t local_victim_idx = wc_random_next(&thief->random_state) % local_node->worker_count;
+            uint32_t victim_id = local_node->worker_ids[local_victim_idx];
 
-        if (attempts < local_node->worker_count) {
-            return local_node->worker_ids[local_victim_idx];
-        }
-    }
+            if (victim_id == thief->thread_id) continue;
+            if (victim_id >= thief->pool->worker_count) continue;
 
-    // Tier 2: Adjacent NUMA nodes with high memory bandwidth (25% probability)
-    // Target nodes with good memory performance for compute-intensive tasks
-    if (g_numa_topology->node_count > 1 && random_val < 95) {
-        // Find the NUMA node with highest memory bandwidth (excluding local node)
-        uint32_t best_remote_node = UINT32_MAX;
-        float best_bandwidth = 0.0f;
-
-        for (uint32_t i = 0; i < g_numa_topology->node_count; i++) {
-            if (i != thief_node && g_numa_topology->nodes[i].worker_count > 0) {
-                if (g_numa_topology->nodes[i].memory_bandwidth_gbps > best_bandwidth) {
-                    best_bandwidth = g_numa_topology->nodes[i].memory_bandwidth_gbps;
-                    best_remote_node = i;
-                }
+            WC_WorkerThread* victim = &thief->pool->workers[victim_id];
+            if (victim->local_queue) {
+                SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                            "NUMA local victim: %u for thief %u", victim_id, thief->thread_id);
+                return victim_id;
             }
         }
+    }
 
-        if (best_remote_node != UINT32_MAX) {
-            WC_NumaNode* remote_node = &g_numa_topology->nodes[best_remote_node];
+    // Try remote NUMA nodes (25% probability)
+    if (g_numa_topology->node_count > 1 && random_val < 95) {
+        for (uint32_t node_idx = 0; node_idx < g_numa_topology->node_count; node_idx++) {
+            if (node_idx == thief_node) continue;
+
+            WC_NumaNode* remote_node = &g_numa_topology->nodes[node_idx];
+            if (remote_node->worker_count == 0) continue;
+
             uint32_t remote_victim_idx = wc_random_next(&thief->random_state) % remote_node->worker_count;
-            return remote_node->worker_ids[remote_victim_idx];
+            uint32_t victim_id = remote_node->worker_ids[remote_victim_idx];
+
+            if (victim_id >= thief->pool->worker_count) continue;
+
+            WC_WorkerThread* victim = &thief->pool->workers[victim_id];
+            if (victim->local_queue) {
+                SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                            "NUMA remote victim: %u for thief %u", victim_id, thief->thread_id);
+                return victim_id;
+            }
         }
     }
 
-    // Tier 3: Random NUMA node (5% probability)
-    // Last resort - completely random selection for load balancing
-    uint32_t random_node;
-    do {
-        random_node = wc_random_next(&thief->random_state) % g_numa_topology->node_count;
-    } while (random_node == thief_node || g_numa_topology->nodes[random_node].worker_count == 0);
-
-    WC_NumaNode* random_remote_node = &g_numa_topology->nodes[random_node];
-    uint32_t random_victim_idx = wc_random_next(&thief->random_state) % random_remote_node->worker_count;
-    return random_remote_node->worker_ids[random_victim_idx];
+    // Fallback to safe random selection
+    return wc_pool_select_random_victim(thief);
 }
 
-// Main victim selection function (FIXED - no recursion)
+// Main victim selection function
 uint32_t wc_pool_select_victim(WC_WorkerThread* thief) {
-    WC_ASSERT(thief);
-    WC_WorkStealingPool* pool = thief->pool;
+	WC_ASSERT(thief);
+	WC_WorkStealingPool* pool = thief->pool;
 
-    // Initialize NUMA topology on first use
-    if (pool->enable_numa_awareness && !g_numa_topology) {
-        wc_pool_init_numa_topology(pool);
-    }
+	SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,"Selecting victim for thief %u (pool has %u workers)",
+				thief->thread_id, pool->worker_count);
 
-    if (pool->enable_numa_awareness && g_numa_topology && g_numa_topology->topology_valid) {
-        return wc_pool_select_numa_victim(thief);
-    }
+	if (pool->enable_numa_awareness) {
+		return wc_pool_select_numa_victim(thief);
+	}
 
-    return wc_pool_select_random_victim(thief);
+	return wc_pool_select_random_victim(thief);
 }
 
 // =============================================================================
 // Enhanced Work Stealing with NUMA Awareness
 // =============================================================================
 
-WC_Task* wc_pool_steal_work_numa_aware(WC_WorkerThread* thief) {
+WC_Task* wc_pool_steal_work(WC_WorkerThread* thief) {
     WC_ASSERT(thief);
 
     WC_WorkStealingPool* pool = thief->pool;
@@ -925,33 +943,39 @@ WC_Task* wc_pool_steal_work_numa_aware(WC_WorkerThread* thief) {
 
     uint32_t attempts = 0;
     uint32_t max_attempts = pool->steal_attempts_per_round;
-    uint32_t successful_steals = 0;
 
-    // Track victim selection performance
-    uint32_t local_attempts = 0, remote_attempts = 0;
+    SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,"Worker %u starting work stealing (%u max attempts)",
+                thief->thread_id, max_attempts);
 
     while (attempts < max_attempts) {
         uint32_t victim_id = wc_pool_select_victim(thief);
 
-        // Safety checks
-        if (victim_id >= pool->worker_count || victim_id == thief->thread_id) {
+        // Comprehensive safety checks
+        if (victim_id >= pool->worker_count) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,"Invalid victim ID %u (max: %u), skipping",
+                        victim_id, pool->worker_count - 1);
             attempts++;
             continue;
         }
 
-        // Track local vs remote stealing
-        if (g_numa_topology && g_numa_topology->topology_valid) {
-            uint32_t thief_node = g_numa_topology->worker_to_node[thief->thread_id];
-            uint32_t victim_node = g_numa_topology->worker_to_node[victim_id];
-
-            if (thief_node == victim_node) {
-                local_attempts++;
-            } else {
-                remote_attempts++;
-            }
+        if (victim_id == thief->thread_id) {
+            SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,"Victim is self, skipping");
+            attempts++;
+            continue;
         }
 
         WC_WorkerThread* victim = &pool->workers[victim_id];
+        if (!victim->local_queue) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,"Victim %u has null deque! (thief: %u)",
+                        victim_id, thief->thread_id);
+            attempts++;
+            continue;
+        }
+
+        // Attempt the steal
+        SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,"Worker %u attempting to steal from worker %u (attempt %u)",
+                    thief->thread_id, victim_id, attempts + 1);
+
         WC_Task* stolen_task = wc_deque_steal_top(victim->local_queue);
 
         thief->steals_attempted++;
@@ -960,37 +984,23 @@ WC_Task* wc_pool_steal_work_numa_aware(WC_WorkerThread* thief) {
         if (stolen_task) {
             thief->steals_succeeded++;
             wc_atomic_u64_fetch_add(pool->total_steal_successes, 1);
-            successful_steals++;
 
-            SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
-                        "Worker %u stole from %u (attempt %u, %u local, %u remote)",
-                        thief->thread_id, victim_id, attempts + 1,
-                        local_attempts, remote_attempts);
+            SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,"Worker %u successfully stole task %p from worker %u",
+                        thief->thread_id, (void*)stolen_task, victim_id);
 
             return stolen_task;
         }
 
         attempts++;
 
-        // Adaptive backoff based on NUMA distance
+        // Adaptive backoff
         if (attempts % 4 == 0) {
-            uint32_t pause_cycles = 1;
-
-            if (g_numa_topology && g_numa_topology->topology_valid) {
-                uint32_t thief_node = g_numa_topology->worker_to_node[thief->thread_id];
-                uint32_t victim_node = g_numa_topology->worker_to_node[victim_id];
-
-                // Longer pause for remote NUMA access
-                if (thief_node != victim_node) {
-                    pause_cycles = 4;
-                }
-            }
-
-            for (uint32_t i = 0; i < pause_cycles; i++) {
-                wc_cpu_pause();
-            }
+            wc_cpu_pause();
         }
     }
+
+    SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,"Worker %u failed to steal after %u attempts",
+                thief->thread_id, max_attempts);
 
     return NULL;
 }
@@ -1329,4 +1339,46 @@ WC_NumaStats wc_pool_get_numa_stats(WC_WorkStealingPool* pool) {
 	}
 
 	return stats;
+}
+
+// =============================================================================
+// DEBUGGING UTILITIES
+// =============================================================================
+
+void wc_pool_validate_workers(WC_WorkStealingPool* pool) {
+	SDL_Log("=== WORKER VALIDATION ===");
+	SDL_Log("Pool worker_count: %u", pool->worker_count);
+
+	for (uint32_t i = 0; i < pool->worker_count; i++) {
+		WC_WorkerThread* worker = &pool->workers[i];
+
+		SDL_Log("Worker %u:", i);
+		SDL_Log("  - thread_id: %u", worker->thread_id);
+		SDL_Log("  - local_queue: %p", (void*)worker->local_queue);
+		SDL_Log("  - thread_arena: %p", (void*)worker->thread_arena);
+		SDL_Log("  - handle: %p", (void*)worker->handle);
+		SDL_Log("  - active: %s", worker->active ? "initialized" : "null");
+
+		if (worker->local_queue) {
+			size_t queue_size = wc_deque_size(worker->local_queue);
+			SDL_Log("  - queue_size: %zu", queue_size);
+		} else {
+			SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+						"  - ERROR: Worker %u has null queue!", i);
+		}
+	}
+	SDL_Log("=== END VALIDATION ===");
+}
+
+// Call this in your initialization to debug the issue
+void wc_debug_thread_pool_creation(void) {
+	SDL_Log("Creating thread pool for debugging...");
+
+	WC_WorkStealingPool* test_pool = wc_pool_create(4);
+	if (test_pool) {
+		wc_pool_validate_workers(test_pool);
+		wc_pool_destroy(test_pool);
+	} else {
+		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to create test pool");
+	}
 }

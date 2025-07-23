@@ -1,9 +1,10 @@
 #include "deque.h"
 
+#include "SDL3/SDL_log.h"
+#include "atomic.h"
 #include "core.h"
 #include "debug.h"
 #include "memory.h"
-#include "atomic.h"
 
 //-------------------------------------------------------------------------------------------------
 // Internal struct definitions - hidden from header
@@ -227,6 +228,11 @@ WC_Task* wc_deque_pop_bottom(WC_Deque* deque) {
 
 WC_Task* wc_deque_steal_top(WC_Deque* deque) {
     WC_ASSERT(deque);
+
+	if (!deque) {
+		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Attempting to steal from null deque!");
+		return NULL;
+	}
 
     size_t top = wc_atomic_size_load_acquire(deque->top);
 

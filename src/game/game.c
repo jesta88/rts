@@ -1,9 +1,11 @@
 #include "game.h"
+
 #include "../system/memory.h"
-#include "../system/thread_pool.h"
 #include "../system/task.h"
+#include "../system/thread_pool.h"
 
 #include <SDL3/SDL_log.h>
+#include <math.h>
 
 typedef struct
 {
@@ -326,6 +328,11 @@ int example_task_system_usage(void)
 
 int wc_game_init()
 {
+	SDL_SetLogPriority(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_DEBUG);
+
+	//wc_debug_thread_pool_creation();
+
+	//return 0;
 	return example_task_system_usage();
 }
 
