@@ -4,59 +4,64 @@
 // Task system
 //-------------------------------------------------------------------------------------------------
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 // Forward declarations - no complex includes needed
 typedef struct WC_Task WC_Task;
 typedef struct WC_TaskGroup WC_TaskGroup;
 typedef struct WC_Arena WC_Arena;
 
-typedef enum WC_TaskState {
-    WC_TASK_PENDING,      // Waiting for dependencies
-    WC_TASK_READY,        // Ready to execute
-    WC_TASK_RUNNING,      // Currently executing
-    WC_TASK_COMPLETED,    // Finished execution
-    WC_TASK_CANCELLED     // Cancelled before execution
+typedef enum WC_TaskState
+{
+	WC_TASK_PENDING,   // Waiting for dependencies
+	WC_TASK_READY,	   // Ready to execute
+	WC_TASK_RUNNING,   // Currently executing
+	WC_TASK_COMPLETED, // Finished execution
+	WC_TASK_CANCELLED  // Cancelled before execution
 } WC_TaskState;
 
-typedef enum WC_TaskPriority {
-    WC_TASK_PRIORITY_CRITICAL = 0,  // Never steal these (NUMA-pinned)
-    WC_TASK_PRIORITY_HIGH = 1,      // Steal locally first
-    WC_TASK_PRIORITY_NORMAL = 2,    // Normal work stealing
-    WC_TASK_PRIORITY_LOW = 3        // Steal these first
+typedef enum WC_TaskPriority
+{
+	WC_TASK_PRIORITY_CRITICAL = 0, // Never steal these (NUMA-pinned)
+	WC_TASK_PRIORITY_HIGH = 1,	   // Steal locally first
+	WC_TASK_PRIORITY_NORMAL = 2,   // Normal work stealing
+	WC_TASK_PRIORITY_LOW = 3	   // Steal these first
 } WC_TaskPriority;
 
-typedef enum WC_TaskYield {
-    WC_TASK_CONTINUE,    // Keep running this task
-    WC_TASK_YIELD,       // Reschedule this task for later
-    WC_TASK_COMPLETE     // Task is finished
+typedef enum WC_TaskYield
+{
+	WC_TASK_CONTINUE, // Keep running this task
+	WC_TASK_YIELD,	  // Reschedule this task for later
+	WC_TASK_COMPLETE  // Task is finished
 } WC_TaskYield;
 
 // Task function signatures
 typedef void (*WC_TaskFunction)(void* data);
 typedef WC_TaskYield (*WC_CooperativeTaskFunction)(void* data);
 
-typedef struct WC_TaskStats {
-    uint64_t total_tasks_created;
-    uint64_t total_tasks_completed;
-    uint64_t total_tasks_cancelled;
-    uint64_t total_execution_time;
-    uint64_t total_wait_time;
-    double avg_execution_time;
-    double avg_wait_time;
-    uint32_t active_tasks;
-    uint32_t pending_tasks;
+typedef struct WC_TaskStats
+{
+	uint64_t total_tasks_created;
+	uint64_t total_tasks_completed;
+	uint64_t total_tasks_cancelled;
+	uint64_t total_execution_time;
+	uint64_t total_wait_time;
+	double avg_execution_time;
+	double avg_wait_time;
+	uint32_t active_tasks;
+	uint32_t pending_tasks;
 } WC_TaskStats;
 
-typedef struct WC_TaskPerfInfo {
-    uint64_t creation_time;
-    uint64_t start_time;
-    uint64_t completion_time;
-    uint64_t execution_duration;
-    uint64_t wait_duration;
-    uint32_t worker_id;
-    uint32_t dependency_count;
+typedef struct WC_TaskPerfInfo
+{
+	uint64_t creation_time;
+	uint64_t start_time;
+	uint64_t completion_time;
+	uint64_t execution_duration;
+	uint64_t wait_duration;
+	uint32_t worker_id;
+	uint32_t dependency_count;
 } WC_TaskPerfInfo;
 
 //-------------------------------------------------------------------------------------------------
@@ -65,8 +70,7 @@ typedef struct WC_TaskPerfInfo {
 
 // Create tasks
 WC_Task* wc_task_create(WC_TaskFunction function, void* data);
-WC_Task* wc_task_create_advanced(WC_TaskFunction function, void* data,
-                                 WC_TaskPriority priority, uint32_t affinity_mask);
+WC_Task* wc_task_create_advanced(WC_TaskFunction function, void* data, WC_TaskPriority priority, uint32_t affinity_mask);
 WC_Task* wc_task_create_cooperative(WC_CooperativeTaskFunction function, void* data);
 
 // Destroy tasks
@@ -100,8 +104,7 @@ WC_Arena* wc_task_group_get_arena(WC_TaskGroup* group);
 //-------------------------------------------------------------------------------------------------
 
 WC_Task* wc_task_spawn_child(WC_Task* parent, WC_TaskFunction function, void* data);
-int wc_task_spawn_children(WC_Task* parent, WC_TaskFunction function,
-                          void** data_array, uint32_t count, WC_Task** out_tasks);
+int wc_task_spawn_children(WC_Task* parent, WC_TaskFunction function, void** data_array, uint32_t count, WC_Task** out_tasks);
 
 //-------------------------------------------------------------------------------------------------
 // Task utilities

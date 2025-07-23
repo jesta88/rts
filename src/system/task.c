@@ -41,15 +41,21 @@ struct WC_Task {
     uint32_t worker_id;          // Which worker executed this task
 };
 
-struct WC_TaskGroup {
-    WC_AtomicU64 remaining_tasks; // How many tasks in this group are still pending
-    WC_Task* continuation;        // Task to execute when group completes
-    void* group_arena;            // Shared memory for all tasks in group (opaque pointer)
+struct WC_TaskGroup
+{
+	WC_AtomicU64 remaining_tasks; // How many tasks in this group are still pending
+	WC_Task* continuation;		  // Task to execute when group completes
+	void* group_arena;			  // Shared memory for all tasks in group (opaque pointer)
 
-    // Group metadata
-    uint32_t total_tasks;
-    uint64_t created_time;
-    bool auto_destroy;           // Destroy group when all tasks complete
+	// Group metadata
+	uint32_t total_tasks;
+	uint64_t created_time;
+	bool auto_destroy; // Destroy group when all tasks complete
+
+	// Task tracking
+	WC_Task** tasks;		// Array of tasks in this group
+	uint32_t task_capacity; // Capacity of tasks array
+	uint32_t task_count;	// Current number of tasks
 };
 
 // Cooperative task wrapper data
@@ -285,78 +291,6 @@ void wc_task_wait_all(WC_Task** tasks, uint32_t count) {
 }
 
 //-------------------------------------------------------------------------------------------------
-// Task groups
-//-------------------------------------------------------------------------------------------------
-
-WC_TaskGroup* wc_task_group_create(uint32_t estimated_task_count) {
-    wc_ensure_task_pools();
-
-	WC_TaskGroup* group = wc_pool_alloc(g_task_group_pool);
-    if (!group) {
-        return NULL;
-    }
-
-    memset(group, 0, sizeof(WC_TaskGroup));
-
-    // Initialize atomic fields
-    group->remaining_tasks = wc_atomic_u64_create(0);
-    if (!group->remaining_tasks) {
-        wc_pool_free(g_task_group_pool, group);
-        return NULL;
-    }
-
-    group->total_tasks = 0;
-    group->created_time = wc_get_time_ns();
-    group->auto_destroy = true;
-
-    // Create group arena (would need arena implementation)
-    // group->group_arena = wc_malloc(sizeof(WC_Arena));
-    // ...
-
-    return group;
-}
-
-void wc_task_group_destroy(WC_TaskGroup* group) {
-    if (!group) return;
-
-	WC_TaskGroup* impl = group;
-
-    WC_ASSERT(wc_atomic_u64_load(impl->remaining_tasks) == 0);
-
-    wc_atomic_u64_destroy(impl->remaining_tasks);
-
-    if (impl->group_arena) {
-        // wc_arena_free((WC_Arena*)impl->group_arena);
-        // wc_free(impl->group_arena);
-    }
-
-    wc_pool_free(g_task_group_pool, impl);
-}
-
-int wc_task_group_add(WC_TaskGroup* group, WC_Task* task) {
-    WC_ASSERT(group && task);
-
-	WC_TaskGroup* group_impl = group;
-	WC_Task* task_impl = task;
-
-    WC_ASSERT(wc_atomic_u64_load(task_impl->state) == WC_TASK_PENDING);
-
-    task_impl->group = group;
-    task_impl->arena = group_impl->group_arena;
-
-    wc_atomic_u64_fetch_add(group_impl->remaining_tasks, 1);
-    group_impl->total_tasks++;
-
-    return 0;
-}
-
-WC_Arena* wc_task_group_get_arena(WC_TaskGroup* group)
-{
-	WC_ASSERT(group);
-	return group->group_arena;
-}
-
-//-------------------------------------------------------------------------------------------------
 // Task utilities and getters
 //-------------------------------------------------------------------------------------------------
 
@@ -401,30 +335,53 @@ WC_TaskPerfInfo wc_task_get_perf_info(const WC_Task* task) {
     return info;
 }
 
+WC_Arena* wc_task_group_get_arena(WC_TaskGroup* group)
+{
+	WC_ASSERT(group);
+	return group->group_arena;
+}
+
 //-------------------------------------------------------------------------------------------------
 // Cooperative tasks
 //-------------------------------------------------------------------------------------------------
 
-static void wc_cooperative_task_wrapper(void* data) {
-    WC_CoopWrapper* wrapper = data;
-    WC_TaskYield result = WC_TASK_CONTINUE;
+static void wc_cooperative_task_wrapper(void* data)
+{
+	WC_CoopWrapper* wrapper = data;
+	WC_TaskYield result = WC_TASK_CONTINUE;
 
-    do {
-        result = wrapper->coop_func(wrapper->user_data);
+	// Get current task from TLS
+	WC_WorkerThread* worker = wc_pool_get_current_worker();
+	WC_Task* current_task = worker ? wc_worker_get_current_task(worker) : NULL;
 
-        if (result == WC_TASK_YIELD) {
-            // Reschedule this task
-            WC_Task* current_task = wc_task_get_current();
-            if (current_task) {
-                wc_task_submit(current_task);
-                wc_free(wrapper); // Cleanup wrapper
-                return; // Exit current execution
-            }
-        }
-    } while (result == WC_TASK_CONTINUE);
+	do
+	{
+		result = wrapper->coop_func(wrapper->user_data);
 
-    // Task completed, cleanup wrapper
-    wc_free(wrapper);
+		if (result == WC_TASK_YIELD)
+		{
+			// Reschedule this task
+			if (current_task)
+			{
+				// Reset state to ready so it can be picked up again
+				wc_task_set_state(current_task, WC_TASK_READY);
+
+				// Submit back to pool
+				WC_WorkStealingPool* pool = wc_get_global_pool();
+				if (pool)
+				{
+					wc_pool_submit_task(pool, current_task);
+				}
+
+				// Don't free wrapper - we'll need it when task resumes
+				return; // Exit current execution
+			}
+		}
+	}
+	while (result == WC_TASK_CONTINUE);
+
+	// Task completed, cleanup wrapper
+	wc_free(wrapper);
 }
 
 WC_Task* wc_task_create_cooperative(WC_CooperativeTaskFunction function, void* data) {
@@ -437,50 +394,6 @@ WC_Task* wc_task_create_cooperative(WC_CooperativeTaskFunction function, void* d
 	wrapper->user_data = data;
 
 	return wc_task_create(wc_cooperative_task_wrapper, wrapper);
-}
-
-//-------------------------------------------------------------------------------------------------
-// Task completion handling (internal)
-//-------------------------------------------------------------------------------------------------
-
-void wc_task_complete_internal(WC_Task* task) {
-    WC_ASSERT(task);
-
-	WC_Task* impl = task;
-
-    // Notify all dependent tasks
-    for (uint32_t i = 0; i < impl->outgoing_count; i++) {
-		WC_Task* dependent = impl->outgoing_deps[i];
-
-        uint64_t remaining = wc_atomic_u64_fetch_sub(dependent->incoming_deps, 1) - 1;
-
-        if (remaining == 0) {
-            // This dependent is now ready to run
-            wc_atomic_u64_store(dependent->state, WC_TASK_READY);
-
-            WC_WorkStealingPool* pool = wc_get_global_pool();
-            if (pool) {
-                wc_pool_submit_task(pool, impl->outgoing_deps[i]);
-            }
-        }
-    }
-
-    // Handle task group completion
-    if (impl->group) {
-		WC_TaskGroup* group = impl->group;
-        uint64_t remaining = wc_atomic_u64_fetch_sub(group->remaining_tasks, 1) - 1;
-
-        if (remaining == 0) {
-            // Group is complete
-            if (group->continuation) {
-                wc_task_submit(group->continuation);
-            }
-
-            if (group->auto_destroy) {
-                wc_task_group_destroy(impl->group);
-            }
-        }
-    }
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -500,20 +413,10 @@ uint32_t wc_task_get_worker_id(void) {
     WC_WorkerThread* worker = wc_pool_get_current_worker();
     return worker ? wc_worker_get_id(worker) : 0;
 }
-
-void wc_task_yield(void) {
-    // This would need to be implemented based on cooperative task system
-    // For now, just a no-op
-}
-
 // Stubs for other functions that depend on missing implementations
 WC_TaskStats wc_task_get_stats(void) {
     WC_TaskStats stats = {0};
     return stats;
-}
-
-void wc_task_reset_stats(void) {
-    // No-op for now
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -578,4 +481,336 @@ WC_Arena* wc_task_get_arena(const WC_Task* task) {
 	WC_ASSERT(task);
 	const struct WC_Task* impl = task;
 	return impl->arena;
+}
+
+
+//-------------------------------------------------------------------------------------------------
+// Task group implementations
+//-------------------------------------------------------------------------------------------------
+
+void wc_task_group_set_continuation(WC_TaskGroup* group, WC_Task* continuation)
+{
+	WC_ASSERT(group);
+
+	WC_TaskGroup* impl = group;
+	impl->continuation = continuation;
+}
+
+void wc_task_group_wait(WC_TaskGroup* group)
+{
+	WC_ASSERT(group);
+
+	WC_TaskGroup* impl = group;
+	WC_WorkStealingPool* pool = wc_get_global_pool();
+
+	// Keep processing tasks until all tasks in the group are complete
+	while (wc_atomic_u64_load(impl->remaining_tasks) > 0)
+	{
+		if (pool)
+		{
+			wc_pool_process_tasks(pool, 1);
+		}
+
+		// Small pause to avoid busy waiting
+		wc_cpu_pause();
+	}
+}
+
+int wc_task_group_submit(WC_TaskGroup* group)
+{
+	WC_ASSERT(group);
+
+	WC_TaskGroup* impl = group;
+
+	if (impl->task_count == 0)
+	{
+		return 0; // No tasks to submit
+	}
+
+	// Submit all tasks in the group
+	return wc_task_submit_batch(impl->tasks, impl->task_count);
+}
+
+// Update wc_task_group_create to allocate task array
+WC_TaskGroup* wc_task_group_create(uint32_t estimated_task_count)
+{
+	wc_ensure_task_pools();
+
+	WC_TaskGroup* group = wc_pool_alloc(g_task_group_pool);
+	if (!group)
+	{
+		return NULL;
+	}
+
+	memset(group, 0, sizeof(WC_TaskGroup));
+
+	// Initialize atomic fields
+	group->remaining_tasks = wc_atomic_u64_create(0);
+	if (!group->remaining_tasks)
+	{
+		wc_pool_free(g_task_group_pool, group);
+		return NULL;
+	}
+
+	group->total_tasks = 0;
+	group->created_time = wc_get_time_ns();
+	group->auto_destroy = true;
+
+	// Allocate task array
+	uint32_t initial_capacity = estimated_task_count > 0 ? estimated_task_count : 16;
+	group->tasks = wc_malloc(initial_capacity * sizeof(WC_Task*));
+	if (!group->tasks)
+	{
+		wc_atomic_u64_destroy(group->remaining_tasks);
+		wc_pool_free(g_task_group_pool, group);
+		return NULL;
+	}
+
+	group->task_capacity = initial_capacity;
+	group->task_count = 0;
+
+	// Create group arena if needed
+	group->group_arena = wc_malloc(sizeof(WC_Arena));
+	if (group->group_arena)
+	{
+		if (wc_arena_init((WC_Arena*)group->group_arena, 64 * 1024) != 0)
+		{
+			wc_free(group->group_arena);
+			group->group_arena = NULL;
+		}
+	}
+
+	return group;
+}
+
+// Update wc_task_group_destroy to free task array
+void wc_task_group_destroy(WC_TaskGroup* group)
+{
+	if (!group)
+		return;
+
+	WC_TaskGroup* impl = group;
+
+	WC_ASSERT(wc_atomic_u64_load(impl->remaining_tasks) == 0);
+
+	wc_atomic_u64_destroy(impl->remaining_tasks);
+
+	if (impl->tasks)
+	{
+		wc_free(impl->tasks);
+	}
+
+	if (impl->group_arena)
+	{
+		wc_arena_free((WC_Arena*)impl->group_arena);
+		wc_free(impl->group_arena);
+	}
+
+	wc_pool_free(g_task_group_pool, impl);
+}
+
+// Update wc_task_group_add to track tasks
+int wc_task_group_add(WC_TaskGroup* group, WC_Task* task)
+{
+	WC_ASSERT(group && task);
+
+	WC_TaskGroup* group_impl = group;
+	WC_Task* task_impl = task;
+
+	WC_ASSERT(wc_atomic_u64_load(task_impl->state) == WC_TASK_PENDING);
+
+	// Resize task array if needed
+	if (group_impl->task_count >= group_impl->task_capacity)
+	{
+		uint32_t new_capacity = group_impl->task_capacity * 2;
+		WC_Task** new_tasks = wc_realloc(group_impl->tasks, new_capacity * sizeof(WC_Task*));
+		if (!new_tasks)
+		{
+			return -1;
+		}
+		group_impl->tasks = new_tasks;
+		group_impl->task_capacity = new_capacity;
+	}
+
+	// Add task to array
+	group_impl->tasks[group_impl->task_count++] = task;
+
+	// Set task's group and arena
+	task_impl->group = group;
+	task_impl->arena = group_impl->group_arena;
+
+	wc_atomic_u64_fetch_add(group_impl->remaining_tasks, 1);
+	group_impl->total_tasks++;
+
+	return 0;
+}
+
+//-------------------------------------------------------------------------------------------------
+// Hierarchical task implementations
+//-------------------------------------------------------------------------------------------------
+
+WC_Task* wc_task_spawn_child(WC_Task* parent, WC_TaskFunction function, void* data)
+{
+	WC_ASSERT(parent && function);
+
+	WC_Task* parent_impl = parent;
+
+	// Create child task
+	WC_Task* child = wc_task_create(function, data);
+	if (!child)
+	{
+		return NULL;
+	}
+
+	WC_Task* child_impl = child;
+
+	// Set parent relationship
+	child_impl->parent = parent;
+
+	// Inherit parent's arena if available
+	if (parent_impl->arena && !child_impl->arena)
+	{
+		child_impl->arena = parent_impl->arena;
+	}
+
+	// Add dependency so parent waits for child
+	if (wc_task_add_dependency(parent, child) != 0)
+	{
+		wc_task_destroy(child);
+		return NULL;
+	}
+
+	return child;
+}
+
+int wc_task_spawn_children(WC_Task* parent, WC_TaskFunction function, void** data_array, uint32_t count, WC_Task** out_tasks)
+{
+	WC_ASSERT(parent && function && data_array && count > 0);
+
+	if (out_tasks)
+	{
+		// Allocate output array if requested
+		for (uint32_t i = 0; i < count; i++)
+		{
+			out_tasks[i] = wc_task_spawn_child(parent, function, data_array[i]);
+			if (!out_tasks[i])
+			{
+				// Cleanup on failure
+				for (uint32_t j = 0; j < i; j++)
+				{
+					wc_task_destroy(out_tasks[j]);
+				}
+				return -1;
+			}
+		}
+	}
+	else
+	{
+		// Just create children without returning them
+		for (uint32_t i = 0; i < count; i++)
+		{
+			WC_Task* child = wc_task_spawn_child(parent, function, data_array[i]);
+			if (!child)
+			{
+				return -1;
+			}
+		}
+	}
+
+	return 0;
+}
+
+//-------------------------------------------------------------------------------------------------
+// Update task completion to handle groups properly
+//-------------------------------------------------------------------------------------------------
+
+void wc_task_complete_internal(WC_Task* task)
+{
+	WC_ASSERT(task);
+
+	WC_Task* impl = task;
+
+	// Mark task as completed
+	wc_atomic_u64_store(impl->state, WC_TASK_COMPLETED);
+
+	// Notify all dependent tasks
+	for (uint32_t i = 0; i < impl->outgoing_count; i++)
+	{
+		WC_Task* dependent = impl->outgoing_deps[i];
+
+		uint64_t remaining = wc_atomic_u64_fetch_sub(dependent->incoming_deps, 1) - 1;
+
+		if (remaining == 0)
+		{
+			// This dependent is now ready to run
+			wc_atomic_u64_store(dependent->state, WC_TASK_READY);
+
+			WC_WorkStealingPool* pool = wc_get_global_pool();
+			if (pool)
+			{
+				wc_pool_submit_task(pool, impl->outgoing_deps[i]);
+			}
+		}
+	}
+
+	// Handle task group completion
+	if (impl->group)
+	{
+		WC_TaskGroup* group = impl->group;
+		uint64_t remaining = wc_atomic_u64_fetch_sub(group->remaining_tasks, 1) - 1;
+
+		if (remaining == 0)
+		{
+			// Group is complete
+			if (group->continuation)
+			{
+				// Submit continuation task
+				WC_WorkStealingPool* pool = wc_get_global_pool();
+				if (pool)
+				{
+					wc_pool_submit_task(pool, group->continuation);
+				}
+			}
+
+			if (group->auto_destroy)
+			{
+				// Note: This is dangerous if someone is still holding a reference
+				// In production, you'd want reference counting or deferred destruction
+				// For now, we'll just not auto-destroy to be safe
+				// wc_task_group_destroy(impl->group);
+			}
+		}
+	}
+}
+
+//-------------------------------------------------------------------------------------------------
+// Cooperative task implementations
+//-------------------------------------------------------------------------------------------------
+
+
+//-------------------------------------------------------------------------------------------------
+// Additional utility implementations
+//-------------------------------------------------------------------------------------------------
+
+void wc_task_yield(void)
+{
+	// Get current task
+	WC_WorkerThread* worker = wc_pool_get_current_worker();
+	WC_Task* current_task = worker ? wc_worker_get_current_task(worker) : NULL;
+
+	if (current_task)
+	{
+		// Mark task as ready (not completed)
+		wc_task_set_state(current_task, WC_TASK_READY);
+
+		// Resubmit to pool
+		WC_WorkStealingPool* pool = wc_get_global_pool();
+		if (pool)
+		{
+			wc_pool_submit_task(pool, current_task);
+		}
+
+		// Note: In a real implementation, we'd need to save/restore the execution context
+		// This is a simplified version that requires cooperative tasks to manage their own state
+	}
 }
