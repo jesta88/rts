@@ -1,5 +1,4 @@
 #include "game.h"
-#include "../system/app.h"
 #include "../system/memory.h"
 #include "../system/thread_pool.h"
 #include "../system/task.h"
