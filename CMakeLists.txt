@@ -59,10 +59,6 @@ add_executable(${PROJECT_NAME} src/main.c
         src/system/deque.h
         src/system/atomic.c
         src/system/atomic.h
-        src/system/deque2.c
-        src/system/deque2.h
-        src/system/task2.c
-        src/system/task2.h
 )
 
 if(WC_SANITIZE)

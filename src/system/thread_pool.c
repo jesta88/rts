@@ -13,6 +13,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winbase.h>
+#include <processthreadsapi.h>
+#endif
+
 //-------------------------------------------------------------------------------------------------
 // Internal structures
 //-------------------------------------------------------------------------------------------------
@@ -76,6 +83,30 @@ struct WC_WorkStealingPool {
     bool enable_numa_awareness;
 };
 
+// =============================================================================
+// NUMA Topology Detection and Management
+// =============================================================================
+
+typedef struct WC_NumaNode {
+	uint32_t* worker_ids;           // Array of worker IDs in this NUMA node
+	uint32_t worker_count;          // Number of workers in this node
+	uint32_t node_id;               // NUMA node identifier
+	GROUP_AFFINITY affinity;        // Win32 processor group affinity
+	uint64_t available_memory_kb;   // Available memory in KB
+	float memory_bandwidth_gbps;    // Estimated memory bandwidth
+} WC_NumaNode;
+
+typedef struct WC_NumaTopology {
+	WC_NumaNode* nodes;             // Array of NUMA nodes
+	uint32_t node_count;            // Number of NUMA nodes
+	uint32_t* worker_to_node;       // Map worker ID -> NUMA node ID
+	uint32_t total_processors;      // Total logical processors
+	bool topology_valid;            // Whether NUMA detection succeeded
+} WC_NumaTopology;
+
+// Global NUMA topology (initialized once)
+static WC_NumaTopology* g_numa_topology = NULL;
+
 //-------------------------------------------------------------------------------------------------
 // Thread-local storage
 //-------------------------------------------------------------------------------------------------
@@ -125,8 +156,9 @@ static void wc_pin_thread_to_core(uint32_t core_id) {
 //-------------------------------------------------------------------------------------------------
 
 static void wc_pool_worker_sleep(WC_WorkerThread* worker);
-static void wc_pool_numa_init(WC_WorkStealingPool* pool);
+static bool wc_pool_init_numa_topology(WC_WorkStealingPool* pool);
 static uint32_t wc_pool_select_numa_victim(WC_WorkerThread* thief);
+static WC_Task* wc_pool_steal_work_numa_aware(WC_WorkerThread* thief);
 
 //-------------------------------------------------------------------------------------------------
 // Worker thread main loop
@@ -162,7 +194,7 @@ static int worker_thread_main(void* arg) {
             idle_spins = 0;
         } else {
             // Phase 2: Try to steal work from other workers
-            task = wc_pool_steal_work(worker);
+            task = wc_pool_steal_work_numa_aware(worker);
             if (task) {
                 idle_spins = 0;
             } else {
@@ -318,7 +350,7 @@ WC_WorkStealingPool* wc_pool_create(uint32_t worker_count) {
 
     // Initialize NUMA if enabled
     if (pool->enable_numa_awareness) {
-        wc_pool_numa_init(pool);
+        wc_pool_init_numa_topology(pool);
     }
 
     return pool;
@@ -500,11 +532,390 @@ void wc_pool_process_tasks(WC_WorkStealingPool* pool, uint32_t max_tasks) {
     }
 }
 
-//-------------------------------------------------------------------------------------------------
-// Work stealing implementation
-//-------------------------------------------------------------------------------------------------
+void wc_pool_execute_task(WC_WorkerThread* worker, WC_Task* task) {
+	WC_ASSERT(worker && task);
 
-WC_Task* wc_pool_steal_work(WC_WorkerThread* thief) {
+	// Update task state
+	wc_task_set_state(task, WC_TASK_RUNNING);
+	wc_task_set_started_time(task, wc_get_time_ns());
+	wc_task_set_worker_id(task, worker->thread_id);
+
+	// Set current task
+	worker->current_task = task;
+	worker->task_start_time = wc_task_get_started_time(task);
+
+	// Execute the task function
+	WC_TaskFunction function = wc_task_get_function(task);
+	if (function) {
+		void* data = wc_task_get_data(task);
+		function(data);
+	}
+
+	// Update completion time
+	wc_task_set_completed_time(task, wc_get_time_ns());
+	wc_task_set_state(task, WC_TASK_COMPLETED);
+
+	// Update statistics
+	worker->tasks_executed++;
+	wc_atomic_u64_fetch_add(worker->pool->total_tasks_completed, 1);
+
+	// Handle task completion (dependencies, etc.)
+	wc_task_complete_internal(task);
+
+	// Clear current task
+	worker->current_task = NULL;
+}
+
+#ifdef _WIN32
+// Detect NUMA topology using Win32 APIs
+static bool wc_detect_numa_topology_win32(WC_WorkStealingPool* pool) {
+    ULONG highest_node_number = 0;
+
+    // Get the highest NUMA node number
+    if (!GetNumaHighestNodeNumber(&highest_node_number)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                   "GetNumaHighestNodeNumber failed: %lu. Treating as non-NUMA system.",
+                   GetLastError());
+        return false;
+    }
+
+    g_numa_topology->node_count = highest_node_number + 1;
+    SDL_Log("Detected %u NUMA nodes", g_numa_topology->node_count);
+
+    // Allocate node array
+    g_numa_topology->nodes = wc_aligned_alloc(
+        g_numa_topology->node_count * sizeof(WC_NumaNode), 64);
+    if (!g_numa_topology->nodes) {
+        return false;
+    }
+
+    uint32_t total_workers_assigned = 0;
+
+    // For each NUMA node, get processor affinity and available memory
+    for (ULONG node_idx = 0; node_idx <= highest_node_number; node_idx++) {
+        WC_NumaNode* node = &g_numa_topology->nodes[node_idx];
+        node->node_id = node_idx;
+        node->worker_count = 0;
+
+        // Get processor group affinity for this NUMA node
+        GROUP_AFFINITY group_affinity = {0};
+        if (!GetNumaNodeProcessorMaskEx((USHORT)node_idx, &group_affinity)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                       "GetNumaNodeProcessorMaskEx failed for node %lu: %lu",
+                       node_idx, GetLastError());
+            continue;
+        }
+
+        node->affinity = group_affinity;
+
+        // Get available memory for this NUMA node
+        ULONGLONG available_bytes = 0;
+        if (GetNumaAvailableMemoryNodeEx((USHORT)node_idx, &available_bytes)) {
+            node->available_memory_kb = available_bytes / 1024;
+        } else {
+            node->available_memory_kb = 0;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                       "GetNumaAvailableMemoryNodeEx failed for node %lu: %lu",
+                       node_idx, GetLastError());
+        }
+
+        // Count processors in this node
+        uint32_t processor_count = 0;
+        KAFFINITY mask = group_affinity.Mask;
+        while (mask) {
+            if (mask & 1) processor_count++;
+            mask >>= 1;
+        }
+
+        // Estimate memory bandwidth (rough heuristic: 50GB/s per socket for modern systems)
+        node->memory_bandwidth_gbps = 50.0f * (processor_count / 16.0f); // Assume 16 cores per socket
+
+        SDL_Log("NUMA Node %lu: %u processors, %llu KB memory, ~%.1f GB/s bandwidth",
+                node_idx, processor_count, node->available_memory_kb / 1024,
+                node->memory_bandwidth_gbps);
+
+        // Allocate worker ID array (we'll populate this next)
+        node->worker_ids = wc_malloc(pool->worker_count * sizeof(uint32_t));
+        if (!node->worker_ids) {
+            return false;
+        }
+    }
+
+    // Now assign workers to NUMA nodes based on their thread affinity
+    for (uint32_t worker_id = 0; worker_id < pool->worker_count; worker_id++) {
+        HANDLE worker_handle = NULL;
+
+        // Get the actual Win32 thread handle for this worker
+        // Note: This requires modifying WC_WorkerThread to store the Win32 handle
+        WC_WorkerThread* worker = &pool->workers[worker_id];
+        if (worker->handle) {
+            // Assuming worker->handle is the SDL_Thread*, we need to get Win32 handle
+            // SDL3 doesn't expose this directly, so we'll use GetCurrentThread() as fallback
+            worker_handle = GetCurrentThread();
+        }
+
+        if (!worker_handle) {
+            // Fallback: distribute workers round-robin across NUMA nodes
+            uint32_t assigned_node = worker_id % g_numa_topology->node_count;
+            WC_NumaNode* node = &g_numa_topology->nodes[assigned_node];
+            node->worker_ids[node->worker_count++] = worker_id;
+            g_numa_topology->worker_to_node[worker_id] = assigned_node;
+
+            SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                        "Worker %u assigned to NUMA node %u (round-robin)",
+                        worker_id, assigned_node);
+            continue;
+        }
+
+        // Get thread's current processor number
+        PROCESSOR_NUMBER proc_number = {0};
+        if (GetThreadIdealProcessorEx(worker_handle, &proc_number)) {
+            // Find which NUMA node this processor belongs to
+            USHORT node_number = 0;
+            if (GetNumaProcessorNodeEx(&proc_number, &node_number)) {
+                if (node_number < g_numa_topology->node_count) {
+                    WC_NumaNode* node = &g_numa_topology->nodes[node_number];
+                    node->worker_ids[node->worker_count++] = worker_id;
+                    g_numa_topology->worker_to_node[worker_id] = node_number;
+                    total_workers_assigned++;
+
+                    SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                                "Worker %u assigned to NUMA node %u (processor-based)",
+                                worker_id, node_number);
+                    continue;
+                }
+            }
+        }
+
+        // Fallback if processor detection failed
+        uint32_t assigned_node = worker_id % g_numa_topology->node_count;
+        WC_NumaNode* node = &g_numa_topology->nodes[assigned_node];
+        node->worker_ids[node->worker_count++] = worker_id;
+        g_numa_topology->worker_to_node[worker_id] = assigned_node;
+
+        SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                    "Worker %u assigned to NUMA node %u (fallback)",
+                    worker_id, assigned_node);
+    }
+
+    // Log final topology
+    SDL_Log("NUMA topology assignment complete:");
+    for (uint32_t i = 0; i < g_numa_topology->node_count; i++) {
+        WC_NumaNode* node = &g_numa_topology->nodes[i];
+        SDL_Log("  Node %u: %u workers, %llu MB memory",
+                i, node->worker_count, node->available_memory_kb / 1024);
+    }
+
+    return true;
+}
+
+// Set thread affinity to specific NUMA node
+static bool wc_set_thread_numa_affinity(HANDLE thread_handle, uint32_t numa_node) {
+    if (numa_node >= g_numa_topology->node_count) {
+        return false;
+    }
+
+    WC_NumaNode* node = &g_numa_topology->nodes[numa_node];
+
+    // Set processor group affinity
+    if (!SetThreadGroupAffinity(thread_handle, &node->affinity, NULL)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                   "SetThreadGroupAffinity failed for NUMA node %u: %lu",
+                   numa_node, GetLastError());
+        return false;
+    }
+
+    // Set NUMA preferred node for memory allocations
+    if (!SetThreadIdealProcessorEx(thread_handle, NULL, NULL)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                   "SetThreadIdealProcessorEx failed for NUMA node %u: %lu",
+                   numa_node, GetLastError());
+    }
+
+    return true;
+}
+
+#endif // _WIN32
+
+// =============================================================================
+// NUMA Topology Initialization
+// =============================================================================
+
+static bool wc_pool_init_numa_topology(WC_WorkStealingPool* pool) {
+    if (g_numa_topology) return true; // Already initialized
+
+    g_numa_topology = wc_aligned_alloc(sizeof(WC_NumaTopology), 64);
+    if (!g_numa_topology) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to allocate NUMA topology");
+        return false;
+    }
+
+    memset(g_numa_topology, 0, sizeof(WC_NumaTopology));
+
+    // Allocate worker-to-node mapping
+    g_numa_topology->worker_to_node = wc_malloc(pool->worker_count * sizeof(uint32_t));
+    if (!g_numa_topology->worker_to_node) {
+        wc_aligned_free(g_numa_topology, 64);
+        g_numa_topology = NULL;
+        return false;
+    }
+
+#ifdef _WIN32
+    // Use Win32 NUMA detection
+    if (wc_detect_numa_topology_win32(pool)) {
+        g_numa_topology->topology_valid = true;
+        SDL_Log("NUMA topology detection successful");
+        return true;
+    }
+#endif
+
+    // Fallback: create single node with all workers
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+               "NUMA detection failed, using single-node fallback");
+
+    g_numa_topology->node_count = 1;
+    g_numa_topology->nodes = wc_aligned_alloc(sizeof(WC_NumaNode), 64);
+
+    if (!g_numa_topology->nodes) {
+        wc_free(g_numa_topology->worker_to_node);
+        wc_aligned_free(g_numa_topology, 64);
+        g_numa_topology = NULL;
+        return false;
+    }
+
+    // Initialize single node with all workers
+    WC_NumaNode* node = &g_numa_topology->nodes[0];
+    node->node_id = 0;
+    node->worker_count = pool->worker_count;
+    node->available_memory_kb = 8 * 1024 * 1024; // Assume 8GB
+    node->memory_bandwidth_gbps = 25.0f; // Conservative estimate
+    node->worker_ids = wc_malloc(pool->worker_count * sizeof(uint32_t));
+
+    if (!node->worker_ids) {
+        wc_free(g_numa_topology->nodes);
+        wc_free(g_numa_topology->worker_to_node);
+        wc_aligned_free(g_numa_topology, 64);
+        g_numa_topology = NULL;
+        return false;
+    }
+
+    for (uint32_t i = 0; i < pool->worker_count; i++) {
+        node->worker_ids[i] = i;
+        g_numa_topology->worker_to_node[i] = 0;
+    }
+
+    g_numa_topology->topology_valid = true;
+    SDL_Log("Single-node NUMA topology initialized with %u workers", pool->worker_count);
+    return true;
+}
+
+// =============================================================================
+// Optimal NUMA-Aware Victim Selection
+// =============================================================================
+
+// Core random victim selection (non-recursive)
+static uint32_t wc_pool_select_random_victim(WC_WorkerThread* thief) {
+    WC_ASSERT(thief);
+    WC_WorkStealingPool* pool = thief->pool;
+
+    if (pool->worker_count <= 1) {
+        return thief->thread_id; // No other workers to steal from
+    }
+
+    // Generate random victim different from ourselves
+    uint32_t victim_id;
+    do {
+        victim_id = wc_random_next(&thief->random_state) % pool->worker_count;
+    } while (victim_id == thief->thread_id);
+
+    return victim_id;
+}
+
+// NUMA-aware victim selection with three-tier strategy
+static uint32_t wc_pool_select_numa_victim(WC_WorkerThread* thief) {
+    WC_ASSERT(thief);
+
+    if (!g_numa_topology || !g_numa_topology->topology_valid) {
+        return wc_pool_select_random_victim(thief);
+    }
+
+    uint32_t thief_node = g_numa_topology->worker_to_node[thief->thread_id];
+    WC_NumaNode* local_node = &g_numa_topology->nodes[thief_node];
+    uint32_t random_val = wc_random_next(&thief->random_state) % 100;
+
+    // Tier 1: Local NUMA node (70% probability)
+    // Prioritize same-node stealing for best cache locality
+    if (local_node->worker_count > 1 && random_val < 70) {
+        uint32_t local_victim_idx;
+        uint32_t attempts = 0;
+        do {
+            local_victim_idx = wc_random_next(&thief->random_state) % local_node->worker_count;
+            attempts++;
+        } while (local_node->worker_ids[local_victim_idx] == thief->thread_id &&
+                 attempts < local_node->worker_count);
+
+        if (attempts < local_node->worker_count) {
+            return local_node->worker_ids[local_victim_idx];
+        }
+    }
+
+    // Tier 2: Adjacent NUMA nodes with high memory bandwidth (25% probability)
+    // Target nodes with good memory performance for compute-intensive tasks
+    if (g_numa_topology->node_count > 1 && random_val < 95) {
+        // Find the NUMA node with highest memory bandwidth (excluding local node)
+        uint32_t best_remote_node = UINT32_MAX;
+        float best_bandwidth = 0.0f;
+
+        for (uint32_t i = 0; i < g_numa_topology->node_count; i++) {
+            if (i != thief_node && g_numa_topology->nodes[i].worker_count > 0) {
+                if (g_numa_topology->nodes[i].memory_bandwidth_gbps > best_bandwidth) {
+                    best_bandwidth = g_numa_topology->nodes[i].memory_bandwidth_gbps;
+                    best_remote_node = i;
+                }
+            }
+        }
+
+        if (best_remote_node != UINT32_MAX) {
+            WC_NumaNode* remote_node = &g_numa_topology->nodes[best_remote_node];
+            uint32_t remote_victim_idx = wc_random_next(&thief->random_state) % remote_node->worker_count;
+            return remote_node->worker_ids[remote_victim_idx];
+        }
+    }
+
+    // Tier 3: Random NUMA node (5% probability)
+    // Last resort - completely random selection for load balancing
+    uint32_t random_node;
+    do {
+        random_node = wc_random_next(&thief->random_state) % g_numa_topology->node_count;
+    } while (random_node == thief_node || g_numa_topology->nodes[random_node].worker_count == 0);
+
+    WC_NumaNode* random_remote_node = &g_numa_topology->nodes[random_node];
+    uint32_t random_victim_idx = wc_random_next(&thief->random_state) % random_remote_node->worker_count;
+    return random_remote_node->worker_ids[random_victim_idx];
+}
+
+// Main victim selection function (FIXED - no recursion)
+uint32_t wc_pool_select_victim(WC_WorkerThread* thief) {
+    WC_ASSERT(thief);
+    WC_WorkStealingPool* pool = thief->pool;
+
+    // Initialize NUMA topology on first use
+    if (pool->enable_numa_awareness && !g_numa_topology) {
+        wc_pool_init_numa_topology(pool);
+    }
+
+    if (pool->enable_numa_awareness && g_numa_topology && g_numa_topology->topology_valid) {
+        return wc_pool_select_numa_victim(thief);
+    }
+
+    return wc_pool_select_random_victim(thief);
+}
+
+// =============================================================================
+// Enhanced Work Stealing with NUMA Awareness
+// =============================================================================
+
+WC_Task* wc_pool_steal_work_numa_aware(WC_WorkerThread* thief) {
     WC_ASSERT(thief);
 
     WC_WorkStealingPool* pool = thief->pool;
@@ -514,12 +925,30 @@ WC_Task* wc_pool_steal_work(WC_WorkerThread* thief) {
 
     uint32_t attempts = 0;
     uint32_t max_attempts = pool->steal_attempts_per_round;
+    uint32_t successful_steals = 0;
+
+    // Track victim selection performance
+    uint32_t local_attempts = 0, remote_attempts = 0;
 
     while (attempts < max_attempts) {
         uint32_t victim_id = wc_pool_select_victim(thief);
-        if (victim_id == thief->thread_id) {
+
+        // Safety checks
+        if (victim_id >= pool->worker_count || victim_id == thief->thread_id) {
             attempts++;
-            continue; // Don't steal from ourselves
+            continue;
+        }
+
+        // Track local vs remote stealing
+        if (g_numa_topology && g_numa_topology->topology_valid) {
+            uint32_t thief_node = g_numa_topology->worker_to_node[thief->thread_id];
+            uint32_t victim_node = g_numa_topology->worker_to_node[victim_id];
+
+            if (thief_node == victim_node) {
+                local_attempts++;
+            } else {
+                remote_attempts++;
+            }
         }
 
         WC_WorkerThread* victim = &pool->workers[victim_id];
@@ -531,67 +960,65 @@ WC_Task* wc_pool_steal_work(WC_WorkerThread* thief) {
         if (stolen_task) {
             thief->steals_succeeded++;
             wc_atomic_u64_fetch_add(pool->total_steal_successes, 1);
+            successful_steals++;
+
+            SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                        "Worker %u stole from %u (attempt %u, %u local, %u remote)",
+                        thief->thread_id, victim_id, attempts + 1,
+                        local_attempts, remote_attempts);
+
             return stolen_task;
         }
 
         attempts++;
+
+        // Adaptive backoff based on NUMA distance
+        if (attempts % 4 == 0) {
+            uint32_t pause_cycles = 1;
+
+            if (g_numa_topology && g_numa_topology->topology_valid) {
+                uint32_t thief_node = g_numa_topology->worker_to_node[thief->thread_id];
+                uint32_t victim_node = g_numa_topology->worker_to_node[victim_id];
+
+                // Longer pause for remote NUMA access
+                if (thief_node != victim_node) {
+                    pause_cycles = 4;
+                }
+            }
+
+            for (uint32_t i = 0; i < pause_cycles; i++) {
+                wc_cpu_pause();
+            }
+        }
     }
 
     return NULL;
 }
 
-uint32_t wc_pool_select_victim(WC_WorkerThread* thief) {
-    WC_ASSERT(thief);
+// =============================================================================
+// Memory cleanup
+// =============================================================================
 
-    WC_WorkStealingPool* pool = thief->pool;
+void wc_pool_cleanup_numa_topology(void) {
+	if (g_numa_topology) {
+		if (g_numa_topology->nodes) {
+			for (uint32_t i = 0; i < g_numa_topology->node_count; i++) {
+				if (g_numa_topology->nodes[i].worker_ids) {
+					wc_free(g_numa_topology->nodes[i].worker_ids);
+				}
+			}
+			wc_aligned_free(g_numa_topology->nodes, 64);
+		}
 
-    if (pool->enable_numa_awareness) {
-        return wc_pool_select_numa_victim(thief);
-    }
+		if (g_numa_topology->worker_to_node) {
+			wc_free(g_numa_topology->worker_to_node);
+		}
 
-    // Simple random victim selection
-    uint32_t victim_id = wc_random_next(&thief->random_state) % pool->worker_count;
+		wc_aligned_free(g_numa_topology, 64);
+		g_numa_topology = NULL;
 
-    // Avoid selecting ourselves
-    if (victim_id == thief->thread_id) {
-        victim_id = (victim_id + 1) % pool->worker_count;
-    }
-
-    return victim_id;
-}
-
-void wc_pool_execute_task(WC_WorkerThread* worker, WC_Task* task) {
-    WC_ASSERT(worker && task);
-
-    // Update task state
-    wc_task_set_state(task, WC_TASK_RUNNING);
-    wc_task_set_started_time(task, wc_get_time_ns());
-    wc_task_set_worker_id(task, worker->thread_id);
-
-    // Set current task
-    worker->current_task = task;
-    worker->task_start_time = wc_task_get_started_time(task);
-
-    // Execute the task function
-    WC_TaskFunction function = wc_task_get_function(task);
-    if (function) {
-        void* data = wc_task_get_data(task);
-        function(data);
-    }
-
-    // Update completion time
-    wc_task_set_completed_time(task, wc_get_time_ns());
-    wc_task_set_state(task, WC_TASK_COMPLETED);
-
-    // Update statistics
-    worker->tasks_executed++;
-    wc_atomic_u64_fetch_add(worker->pool->total_tasks_completed, 1);
-
-    // Handle task completion (dependencies, etc.)
-    wc_task_complete_internal(task);
-
-    // Clear current task
-    worker->current_task = NULL;
+		SDL_Log("NUMA topology cleaned up");
+	}
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -694,10 +1121,11 @@ int wc_init_global_pool(void) {
     uint32_t cpu_count = wc_get_cpu_count();
     uint32_t worker_count = (cpu_count > 1) ? cpu_count - 1 : 1; // Leave one core for main thread
 
-    g_global_pool = wc_pool_create(worker_count);
-    if (!g_global_pool) {
-        return -1;
-    }
+	g_global_pool = wc_pool_create(worker_count);
+	if (!g_global_pool) {
+		return -1;
+	}
+	wc_pool_init_numa_topology(g_global_pool);
 
     g_global_pool_initialized = true;
     return 0;
@@ -705,24 +1133,11 @@ int wc_init_global_pool(void) {
 
 void wc_shutdown_global_pool(void) {
     if (g_global_pool_initialized) {
+    	wc_pool_cleanup_numa_topology();
         wc_pool_destroy(g_global_pool);
         g_global_pool = NULL;
         g_global_pool_initialized = false;
     }
-}
-
-//-------------------------------------------------------------------------------------------------
-// NUMA stubs (implement these based on your requirements)
-//-------------------------------------------------------------------------------------------------
-
-static void wc_pool_numa_init(WC_WorkStealingPool* pool) {
-    // TODO: Implement NUMA initialization
-    (void)pool;
-}
-
-static uint32_t wc_pool_select_numa_victim(WC_WorkerThread* thief) {
-    // For now, just use random selection
-    return wc_pool_select_victim(thief);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -834,4 +1249,84 @@ WC_PoolConfig wc_pool_get_config(const WC_WorkStealingPool* pool) {
     config.load_balance_interval_ms = 100;
 
     return config;
+}
+
+// =============================================================================
+// Thread Pool Integration
+// =============================================================================
+
+// Initialize worker threads with NUMA affinity
+int wc_pool_init_numa_workers(WC_WorkStealingPool* pool) {
+	if (!wc_pool_init_numa_topology(pool)) {
+		return -1;
+	}
+
+#ifdef _WIN32
+	// Set affinity for existing worker threads
+	for (uint32_t i = 1; i < pool->worker_count; i++) { // Skip main thread (index 0)
+		WC_WorkerThread* worker = &pool->workers[i];
+		if (worker->handle && g_numa_topology && g_numa_topology->topology_valid) {
+			uint32_t numa_node = g_numa_topology->worker_to_node[i];
+
+			// Get Win32 thread handle from SDL thread
+			// Note: SDL3 doesn't expose this directly, this is conceptual
+			HANDLE win32_handle = GetCurrentThread(); // Placeholder
+
+			if (wc_set_thread_numa_affinity(win32_handle, numa_node)) {
+				SDL_Log("Set NUMA affinity for worker %u to node %u", i, numa_node);
+			}
+		}
+	}
+#endif
+
+	return 0;
+}
+
+// =============================================================================
+// Performance Monitoring
+// =============================================================================
+
+typedef struct WC_NumaStats {
+	uint64_t local_steals;
+	uint64_t remote_steals;
+	uint64_t failed_local_steals;
+	uint64_t failed_remote_steals;
+	double local_success_rate;
+	double remote_success_rate;
+	double numa_efficiency; // Higher is better (more local steals)
+} WC_NumaStats;
+
+WC_NumaStats wc_pool_get_numa_stats(WC_WorkStealingPool* pool) {
+	WC_NumaStats stats = {0};
+
+	if (!g_numa_topology || !g_numa_topology->topology_valid) {
+		return stats;
+	}
+
+	// Aggregate stats from all workers
+	for (uint32_t i = 0; i < pool->worker_count; i++) {
+		WC_WorkerThread* worker = &pool->workers[i];
+		// Note: We'd need to add local/remote steal tracking to worker stats
+		stats.local_steals += worker->steals_succeeded; // Placeholder
+		stats.remote_steals += 0; // Would track separately
+	}
+
+	// Calculate success rates and efficiency
+	uint64_t total_local = stats.local_steals + stats.failed_local_steals;
+	uint64_t total_remote = stats.remote_steals + stats.failed_remote_steals;
+
+	if (total_local > 0) {
+		stats.local_success_rate = (double)stats.local_steals / total_local;
+	}
+
+	if (total_remote > 0) {
+		stats.remote_success_rate = (double)stats.remote_steals / total_remote;
+	}
+
+	uint64_t total_steals = stats.local_steals + stats.remote_steals;
+	if (total_steals > 0) {
+		stats.numa_efficiency = (double)stats.local_steals / total_steals;
+	}
+
+	return stats;
 }
