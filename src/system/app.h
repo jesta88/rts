@@ -10,7 +10,7 @@ typedef struct WC_AppCallbacks
 	void (*quit)(void);
 } WC_AppCallbacks;
 
-int wc_app_init(const char* window_title, WC_AppCallbacks callbacks);
+void wc_app_init(const char* window_title, WC_AppCallbacks callbacks);
 void wc_app_quit();
 
 bool wc_app_is_running();

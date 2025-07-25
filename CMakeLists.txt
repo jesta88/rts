@@ -1,3 +1,4 @@
+# Forcing a clean rebuild by modifying this file again to be absolutely sure.
 cmake_minimum_required(VERSION 3.31)
 project(warcry C CXX)
 
@@ -51,15 +52,9 @@ add_executable(${PROJECT_NAME} src/main.c
         src/render/resource.c
         src/render/resource.h
         src/render/types.h
-        src/system/task.c
-        src/system/task.h
-        src/system/thread_pool.c
-        src/system/thread_pool.h
         src/system/deque.c
         src/system/deque.h
-        src/system/atomic.c
-        src/system/atomic.h
-)
+ "src/system/job.h" "src/system/fiber.h" "src/system/fiber.c" "src/system/job.c" "src/system/profiler.c" "src/system/profiler.h")
 
 if(WC_SANITIZE)
     if(MSVC)
@@ -69,7 +64,7 @@ if(WC_SANITIZE)
 endif()
 
 if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /permissive- /W3 /WX /Oi /TC /std:clatest /Zi /Zo /FS /utf-8 /GS- /fp:fast /arch:AVX2)
+    target_compile_options(${PROJECT_NAME} PRIVATE /permissive- /W3 /WX /Oi /TC /std:clatest /experimental:c11atomics /Zi /Zo /FS /utf-8 /GS- /fp:fast /arch:AVX2)
     target_link_options(${PROJECT_NAME} PRIVATE /INCREMENTAL:NO /OPT:REF,ICF /SUBSYSTEM:WINDOWS)
     target_compile_definitions(${PROJECT_NAME} PRIVATE WC_WINDOWS WC_MSVC _CRT_SECURE_NO_WARNINGS)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

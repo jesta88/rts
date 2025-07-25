@@ -394,21 +394,21 @@ static int s_map_SDL_keys(const SDL_Keycode key)
 
 static WC_App s_app;
 
-int wc_app_init(const char* window_title, const WC_AppCallbacks callbacks)
+void wc_app_init(const char* window_title, const WC_AppCallbacks callbacks)
 {
 	s_app.callbacks = callbacks;
 
 	if (!SDL_Init(SDL_INIT_EVENTS | SDL_INIT_VIDEO))
 	{
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_Init: %s\n", SDL_GetError());
-		return -1;
+		return;
 	}
 
 	wc_config config = {0};
 	if (wc_config_load(&config, "settings.cfg") != 0)
 	{
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load settings.cfg\n");
-		return -1;
+		return;
 	}
 
 	const uint64_t tick_frequency = SDL_GetPerformanceFrequency();
@@ -430,7 +430,7 @@ int wc_app_init(const char* window_title, const WC_AppCallbacks callbacks)
 	if (!sdl_window)
 	{
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_CreateWindow: %s\n", SDL_GetError());
-		return -1;
+		return;
 	}
 
 	s_app.window.handle = sdl_window;
@@ -439,16 +439,11 @@ int wc_app_init(const char* window_title, const WC_AppCallbacks callbacks)
 	SDL_GetWindowSize(sdl_window, &s_app.window.width, &s_app.window.height);
 
 	s_app.running = true;
-
-	if (s_app.callbacks.init)
-		return s_app.callbacks.init();
-
-	return 0;
 }
 
 void wc_app_quit()
 {
-	if (s_app.callbacks.quit)
+	if (s_app.callbacks.quit != NULL)
 		s_app.callbacks.quit();
 
 	SDL_DestroyWindow(s_app.window.handle);
@@ -652,7 +647,7 @@ void wc_app_update()
 	while (s_app.time.accumulator >= WC_FIXED_TIMESTEP)
 	{
 		// Update the game logic with a fixed, constant delta time.
-		if (s_app.callbacks.update)
+		if (s_app.callbacks.update != NULL)
 			s_app.callbacks.update(WC_FIXED_TIMESTEP);
 
 		// Decrease the accumulator by the fixed step amount.
@@ -660,7 +655,7 @@ void wc_app_update()
 	}
 
 	const double interpolant = s_app.time.accumulator / WC_FIXED_TIMESTEP;
-	if (s_app.callbacks.render)
+	if (s_app.callbacks.render != NULL)
 		s_app.callbacks.render(interpolant);
 }
 

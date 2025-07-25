@@ -1,8 +1,7 @@
 #include "game.h"
 
 #include "../system/memory.h"
-#include "../system/task.h"
-#include "../system/thread_pool.h"
+#include "../system/job.h"
 
 #include <SDL3/SDL_log.h>
 #include <math.h>
@@ -19,6 +18,7 @@ typedef struct
 typedef struct
 {
 	Unit* units;
+	WC_Arena arena;
 	uint32_t unit_count;
 	uint32_t capacity;
 } GameWorld;
@@ -45,9 +45,6 @@ void process_ai_decisions(void* data)
 {
 	AITaskData* ai_data = (AITaskData*)data;
 
-	SDL_Log("AI Task: Processing %u units starting at %u on worker %u\n", ai_data->count, ai_data->start_index,
-		   wc_task_get_worker_id());
-
 	for (uint32_t i = 0; i < ai_data->count; i++)
 	{
 		Unit* unit = &ai_data->units[ai_data->start_index + i];
@@ -72,9 +69,6 @@ void process_ai_decisions(void* data)
 void process_movement(void* data)
 {
 	MovementTaskData* move_data = (MovementTaskData*)data;
-
-	SDL_Log("Movement Task: Processing %u units starting at %u on worker %u\n", move_data->count, move_data->start_index,
-		   wc_task_get_worker_id());
 
 	for (uint32_t i = 0; i < move_data->count; i++)
 	{
@@ -102,9 +96,6 @@ void process_combat(void* data)
 {
 	MovementTaskData* combat_data = (MovementTaskData*)data;
 
-	SDL_Log("Combat Task: Processing %u units starting at %u on worker %u\n", combat_data->count, combat_data->start_index,
-		   wc_task_get_worker_id());
-
 	// Simple combat: reduce health over time
 	for (uint32_t i = 0; i < combat_data->count; i++)
 	{
@@ -115,37 +106,6 @@ void process_combat(void* data)
 	}
 }
 
-// Cooperative task example
-WC_TaskYield process_large_dataset(void* data)
-{
-	static uint32_t processed_items = 0;
-	uint32_t* total_items = (uint32_t*)data;
-
-	const uint32_t items_per_yield = 1000;
-	uint32_t items_this_round = 0;
-
-	while (processed_items < *total_items && items_this_round < items_per_yield)
-	{
-		// Simulate work
-		processed_items++;
-		items_this_round++;
-
-		// Some expensive computation
-		volatile float result = sinf((float)processed_items);
-		(void)result; // Prevent optimization
-	}
-
-	SDL_Log("Cooperative task processed %u/%u items on worker %u\n", processed_items, *total_items, wc_task_get_worker_id());
-
-	if (processed_items >= *total_items)
-	{
-		processed_items = 0; // Reset for next time
-		return WC_TASK_COMPLETE;
-	}
-
-	return WC_TASK_YIELD; // Yield control and reschedule
-}
-
 //-------------------------------------------------------------------------------------------------
 // Task system integration with game loop
 //-------------------------------------------------------------------------------------------------
@@ -154,26 +114,19 @@ void wc_game_frame_with_tasks(GameWorld* world, float delta_time)
 {
 	const uint32_t units_per_task = 256;
 	const uint32_t total_units = world->unit_count;
-	const uint32_t num_tasks = (total_units + units_per_task - 1) / units_per_task;
+	const uint32_t num_jobs = (total_units + units_per_task - 1) / units_per_task;
 
-	SDL_Log("\n=== Processing frame with %u units using %u tasks ===\n", total_units, num_tasks);
-
-	// Create task group for this frame
-	WC_TaskGroup* frame_group = wc_task_group_create(num_tasks * 3); // AI + Movement + Combat
-
-	// Arrays to hold our tasks
-	WC_Task** ai_tasks = wc_malloc(num_tasks * sizeof(WC_Task*));
-	WC_Task** movement_tasks = wc_malloc(num_tasks * sizeof(WC_Task*));
-	WC_Task** combat_tasks = wc_malloc(num_tasks * sizeof(WC_Task*));
+	WC_JobHandle* ai_jobs = wc_malloc(sizeof(WC_JobHandle) * num_jobs);
+	WC_JobHandle* move_jobs = wc_malloc(sizeof(WC_JobHandle) * num_jobs);
+	WC_JobHandle* combat_jobs = wc_malloc(sizeof(WC_JobHandle) * num_jobs);
 
 	// Task data arrays (allocated from frame arena)
-	WC_Arena* group_arena = wc_task_group_get_arena(frame_group);
-	AITaskData* ai_data = wc_arena_alloc(group_arena, num_tasks * sizeof(AITaskData));
-	MovementTaskData* movement_data = wc_arena_alloc(group_arena, num_tasks * sizeof(MovementTaskData));
-	MovementTaskData* combat_data = wc_arena_alloc(group_arena, num_tasks * sizeof(MovementTaskData));
+	AITaskData* ai_data = wc_arena_alloc(&world->arena, num_jobs * sizeof(AITaskData));
+	MovementTaskData* movement_data = wc_arena_alloc(&world->arena, num_jobs * sizeof(MovementTaskData));
+	MovementTaskData* combat_data = wc_arena_alloc(&world->arena, num_jobs * sizeof(MovementTaskData));
 
-	// Phase 1: Create AI tasks (no dependencies)
-	for (uint32_t i = 0; i < num_tasks; i++)
+	// Phase 1: Create AI jobs (no dependencies)
+	for (uint32_t i = 0; i < num_jobs; i++)
 	{
 		uint32_t start_index = i * units_per_task;
 		uint32_t count = (start_index + units_per_task > total_units) ? total_units - start_index : units_per_task;
@@ -185,12 +138,11 @@ void wc_game_frame_with_tasks(GameWorld* world, float delta_time)
 		ai_data[i].world = world;
 
 		// Create AI task
-		ai_tasks[i] = wc_task_create(process_ai_decisions, &ai_data[i]);
-		wc_task_group_add(frame_group, ai_tasks[i]);
+		ai_jobs[i] = job_schedule("Unit AI", process_ai_decisions, &ai_data[i], g_job_none);
 	}
 
 	// Phase 2: Create movement tasks (depend on AI)
-	for (uint32_t i = 0; i < num_tasks; i++)
+	for (uint32_t i = 0; i < num_jobs; i++)
 	{
 		uint32_t start_index = i * units_per_task;
 		uint32_t count = (start_index + units_per_task > total_units) ? total_units - start_index : units_per_task;
@@ -202,15 +154,11 @@ void wc_game_frame_with_tasks(GameWorld* world, float delta_time)
 		movement_data[i].delta_time = delta_time;
 
 		// Create movement task
-		movement_tasks[i] = wc_task_create(process_movement, &movement_data[i]);
-		wc_task_group_add(frame_group, movement_tasks[i]);
-
-		// Movement depends on corresponding AI task
-		wc_task_add_dependency(movement_tasks[i], ai_tasks[i]);
+		move_jobs[i] = job_schedule("Unit Movement", process_movement, &movement_data[i], ai_jobs[i]);
 	}
 
 	// Phase 3: Create combat tasks (depend on movement)
-	for (uint32_t i = 0; i < num_tasks; i++)
+	for (uint32_t i = 0; i < num_jobs; i++)
 	{
 		uint32_t start_index = i * units_per_task;
 		uint32_t count = (start_index + units_per_task > total_units) ? total_units - start_index : units_per_task;
@@ -222,122 +170,64 @@ void wc_game_frame_with_tasks(GameWorld* world, float delta_time)
 		combat_data[i].delta_time = delta_time;
 
 		// Create combat task
-		combat_tasks[i] = wc_task_create(process_combat, &combat_data[i]);
-		wc_task_group_add(frame_group, combat_tasks[i]);
-
-		// Combat depends on corresponding movement task
-		wc_task_add_dependency(combat_tasks[i], movement_tasks[i]);
+		combat_jobs[i] = job_schedule("Unit Combat", process_combat, &combat_data[i], move_jobs[i]);
 	}
 
-	// Submit all AI tasks first (they have no dependencies)
-	wc_task_submit_batch(ai_tasks, num_tasks);
-
-	// Submit movement and combat tasks (they'll run when dependencies are met)
-	wc_task_submit_batch(movement_tasks, num_tasks);
-	wc_task_submit_batch(combat_tasks, num_tasks);
-
-	// Wait for all tasks in the frame to complete
-	SDL_Log("Waiting for frame tasks to complete...\n");
-	wc_task_group_wait(frame_group);
-	SDL_Log("Frame processing complete!\n");
-
-	// Cleanup
-	wc_free(ai_tasks);
-	wc_free(movement_tasks);
-	wc_free(combat_tasks);
-	wc_task_group_destroy(frame_group);
+	wc_free(ai_jobs);
+	wc_free(move_jobs);
+	wc_free(combat_jobs);
 }
 
 //-------------------------------------------------------------------------------------------------
 // Example usage and integration
 //-------------------------------------------------------------------------------------------------
 
-int example_task_system_usage(void)
+#define UNIT_COUNT 10000
+#define UNITS_PER_TASK 256
+
+static GameWorld g_world;
+
+static void create_test_world()
 {
-	SDL_Log("Initializing task system...\n");
+	g_world.capacity = UNIT_COUNT;
+	g_world.unit_count = UNIT_COUNT;
+	g_world.units = wc_malloc(UNIT_COUNT * sizeof(Unit));
 
-	// Initialize global task system
-	if (wc_init_global_pool() != 0)
-	{
-		SDL_Log("Failed to initialize task system!\n");
-		return -1;
-	}
+	const uint32_t num_jobs = (g_world.unit_count + UNITS_PER_TASK - 1) / UNITS_PER_TASK;
 
-	// Create example game world
-	const uint32_t unit_count = 10000;
-	GameWorld world = {0};
-	world.capacity = unit_count;
-	world.unit_count = unit_count;
-	world.units = wc_malloc(unit_count * sizeof(Unit));
+	wc_arena_init(&g_world.arena, sizeof(AITaskData) * num_jobs + sizeof(MovementTaskData) * num_jobs + sizeof(MovementTaskData) * num_jobs);
 
 	// Initialize units with random positions
-	for (uint32_t i = 0; i < unit_count; i++)
+	for (uint32_t i = 0; i < UNIT_COUNT; i++)
 	{
-		world.units[i].x = (float)(SDL_rand(200) - 100);
-		world.units[i].y = (float)(SDL_rand(200) - 100);
-		world.units[i].z = 0.0f;
-		world.units[i].vx = 0.0f;
-		world.units[i].vy = 0.0f;
-		world.units[i].vz = 0.0f;
-		world.units[i].health = 100.0f;
-		world.units[i].unit_type = SDL_rand(3);
-		world.units[i].player_id = SDL_rand(4);
+		g_world.units[i].x = (float)(SDL_rand(200) - 100);
+		g_world.units[i].y = (float)(SDL_rand(200) - 100);
+		g_world.units[i].z = 0.0f;
+		g_world.units[i].vx = 0.0f;
+		g_world.units[i].vy = 0.0f;
+		g_world.units[i].vz = 0.0f;
+		g_world.units[i].health = 100.0f;
+		g_world.units[i].unit_type = SDL_rand(3);
+		g_world.units[i].player_id = SDL_rand(4);
 	}
-
-	// Example: Process several game frames
-	for (int frame = 0; frame < 3; frame++)
-	{
-		SDL_Log("\n--- Frame %d ---\n", frame);
-		wc_game_frame_with_tasks(&world, 1.0f / 60.0f);
-	}
-
-	// Example: Cooperative task
-	SDL_Log("\n--- Cooperative Task Example ---\n");
-	uint32_t large_dataset_size = 50000;
-	WC_Task* coop_task = wc_task_create_cooperative(process_large_dataset, &large_dataset_size);
-	wc_task_submit(coop_task);
-	wc_task_wait(coop_task);
-
-	// Print statistics
-	SDL_Log("\n--- Task System Statistics ---\n");
-	WC_PoolStats pool_stats = wc_pool_get_stats(wc_get_global_pool());
-	SDL_Log("Tasks submitted: %llu\n", (unsigned long long)pool_stats.total_tasks_submitted);
-	SDL_Log("Tasks completed: %llu\n", (unsigned long long)pool_stats.total_tasks_completed);
-	SDL_Log("Overall steal success rate: %.2f%%\n", pool_stats.overall_steal_success_rate * 100.0);
-	SDL_Log("Worker utilization: %.2f%%\n", pool_stats.overall_utilization * 100.0);
-
-	// Print per-worker statistics
-	WC_LoadBalanceStats* worker_stats = wc_malloc(pool_stats.worker_count * sizeof(WC_LoadBalanceStats));
-	wc_pool_get_load_stats(wc_get_global_pool(), worker_stats);
-
-	SDL_Log("\nPer-worker statistics:\n");
-	for (uint32_t i = 0; i < pool_stats.worker_count; i++)
-	{
-		SDL_Log("Worker %u: %u tasks, %.1f%% utilization, %.1f%% steal success\n", worker_stats[i].worker_id,
-			   worker_stats[i].tasks_executed, worker_stats[i].utilization * 100.0, worker_stats[i].steal_success_rate * 100.0);
-	}
-
-	// Cleanup
-	wc_free(worker_stats);
-	wc_free(world.units);
-	wc_shutdown_global_pool();
-
-	SDL_Log("\nTask system example completed successfully!\n");
-	return 0;
 }
 
 int wc_game_init()
 {
 	SDL_SetLogPriority(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_DEBUG);
 
-	//wc_debug_thread_pool_creation();
+	job_init();
 
-	//return 0;
-	return example_task_system_usage();
+	create_test_world();
+
+	return 0;
 }
 
 void wc_game_update(const double delta_time)
 {
+	wc_game_frame_with_tasks(&g_world, (float)delta_time);
+
+	wc_arena_reset(&g_world.arena);
 }
 
 void wc_game_render(const double interpolant)
@@ -346,4 +236,7 @@ void wc_game_render(const double interpolant)
 
 void wc_game_quit()
 {
+	wc_arena_free(&g_world.arena);
+	wc_free(g_world.units);
+	job_shutdown();
 }
