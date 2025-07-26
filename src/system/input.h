@@ -1,8 +1,6 @@
 #pragma once
 
-#include "core.h"
-
-#include <stdbool.h>
+#include "common.h"
 
 #define WC_ENUM(K, V) case WC_##K = V,
 #define WC_MOUSE_BUTTON_DEFS                                                                                                     \
@@ -27,7 +25,7 @@ static const char* wc_mouse_button_to_string(const WC_MouseButton button)
 	{
 #define WC_ENUM(K, V)                                                                                                            \
 	case WC_##K:                                                                                                                 \
-		return WC_STRINGIFY(WC_##K);
+		return WAR_STRINGIFY(WC_##K);
 		WC_MOUSE_BUTTON_DEFS
 #undef WC_ENUM
 		default:
@@ -289,7 +287,7 @@ static const char* wc_key_button_to_string(const WC_KeyButton button)
 	{
 #define WC_ENUM(K, V)                                                                                                            \
 	case WC_##K:                                                                                                                 \
-		return WC_STRINGIFY(WC_##K);
+		return WAR_STRINGIFY(WC_##K);
 		WC_KEY_BUTTON_DEFS
 #undef WC_ENUM
 		default:

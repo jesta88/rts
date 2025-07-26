@@ -1,34 +1,57 @@
 #pragma once
 
-#include "core.h"
+#include "common.h"
 
-// Job priorities
-typedef enum {
-	JOB_PRIORITY_HIGH = 0,
-	JOB_PRIORITY_NORMAL = 1,
-	JOB_PRIORITY_LOW = 2,
-	JOB_PRIORITY_COUNT = 3
+typedef enum
+{
+    JOB_PRIORITY_HIGH = 0,
+    JOB_PRIORITY_NORMAL = 1,
+    JOB_PRIORITY_LOW = 2,
+    JOB_PRIORITY_COUNT = 3
 } JobPriority;
 
-// Job flags
-typedef enum {
-	JOB_FLAG_SMALL_STACK = 0,  // Use small fiber (default)
-	JOB_FLAG_LARGE_STACK = 1   // Use large fiber for complex jobs
-} JobFlags;
+typedef enum
+{
+    JOB_FLAG_SMALL_STACK = 0,
+    JOB_FLAG_LARGE_STACK = 1
+} job_flags_t;
 
-// Job function signature
+typedef struct
+{
+    u64 value;
+} JobHandle;
+
+typedef struct
+{
+    JobHandle* handles;
+    u32 capacity;
+    u32 count;
+} JobBatch;
+
+#define INVALID_JOB_HANDLE ((JobHandle) {0})
+
 typedef void (*JobFunc)(void* data);
 
-/* --------------- one-time setup / teardown --------------- */
-void job_init(void);
-void job_shutdown(void);
+// Initialize job system
+bool job_system_init(u32 worker_count);
+void job_system_shutdown(void);
 
-/* --------------- producer API (thread-safe) -------------- */
-WC_JobHandle job_schedule(const char* name, void (*func)(void*), void* data, WC_JobHandle after /*0 for none*/);
+// Job creation - returns handle instead of pointer
+JobHandle job_create(JobFunc func, void* data);
+JobHandle job_create_with_flags(JobFunc func, void* data, u8 flags);
+JobHandle job_create_as_child(JobHandle parent, JobFunc func, void* data);
 
-/* --------------- consumer API (job code) ----------------- */
-void job_yield(void);	   /* cooperative yield           */
-void job_wait(WC_JobHandle h); /* spin-yield until finished   */
+// Job execution using handles
+void job_run(JobHandle job);
+void job_wait(JobHandle job);
+bool job_is_complete(JobHandle job);
 
-/* --------------- per-frame flush (optional) -------------- */
-void job_frame_end(void);
+// Batch operations
+JobBatch job_batch_create(u32 capacity);
+void job_batch_destroy(JobBatch* batch);
+void job_batch_add(JobBatch* batch, JobHandle job);
+void job_batch_run(JobBatch* batch, JobPriority priority);
+void job_batch_wait(JobBatch* batch);
+
+// Helper for parallel for loops
+JobHandle job_parallel_for(u32 count, u32 batch_size, void (*func)(u32 start, u32 end, void* data), void* data);

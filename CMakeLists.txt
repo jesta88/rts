@@ -35,10 +35,7 @@ add_executable(${PROJECT_NAME} src/main.c
         src/system/math.h
         src/system/memory.c
         src/system/memory.h
-        src/system/context.c
-        src/system/context.h
-        src/system/debug.h
-        src/system/core.h
+        src/system/common.h
         src/system/config.c
         src/system/config.h
         src/system/app.c
@@ -52,9 +49,11 @@ add_executable(${PROJECT_NAME} src/main.c
         src/render/resource.c
         src/render/resource.h
         src/render/types.h
-        src/system/deque.c
-        src/system/deque.h
- "src/system/job.h" "src/system/fiber.h" "src/system/fiber.c" "src/system/job.c" "src/system/profiler.c" "src/system/profiler.h")
+        "src/system/job.h" "src/system/job.c"
+        src/system/arena.c
+        src/system/arena.h
+        src/system/pool.c
+        src/system/pool.h)
 
 if(WC_SANITIZE)
     if(MSVC)

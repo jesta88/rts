@@ -1,7 +1,6 @@
 #include "app.h"
 
 #include "config.h"
-#include "debug.h"
 #include "input.h"
 
 #include <SDL3/SDL.h>
@@ -510,7 +509,7 @@ static void wc_handle_events()
 					continue;
 				SDL_Keycode key = SDL_GetKeyFromScancode(event.key.scancode, event.key.mod, true);
 				key = s_map_SDL_keys(key);
-				WC_ASSERT(key < 512);
+				assert(key < 512);
 				s_app.keyboard.keys[key] = 1;
 				s_app.keyboard.keys[WC_KEY_ANY] = 1;
 				s_app.keyboard.keys_timestamp[key] = s_app.keyboard.keys_timestamp[WC_KEY_ANY] = s_app.time.seconds;
@@ -523,7 +522,7 @@ static void wc_handle_events()
 					continue;
 				const SDL_Keycode sdl_key = SDL_GetKeyFromScancode(event.key.scancode, event.key.mod, true);
 				const int key = s_map_SDL_keys(sdl_key);
-				WC_ASSERT(key >= 0 && key < 512);
+				assert(key >= 0 && key < 512);
 				s_app.keyboard.keys[key] = 0;
 			}
 			break;

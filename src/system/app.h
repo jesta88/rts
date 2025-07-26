@@ -10,6 +10,12 @@ typedef struct WC_AppCallbacks
 	void (*quit)(void);
 } WC_AppCallbacks;
 
+typedef struct app
+{
+    int argc;
+    const char** argv;
+} app_t;
+
 void wc_app_init(const char* window_title, WC_AppCallbacks callbacks);
 void wc_app_quit();
 

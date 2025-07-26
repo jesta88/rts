@@ -1,29 +1,72 @@
+# .clang-format configuration for C game codebase
+BasedOnStyle: LLVM
+
+# Language and standard
 Language: Cpp
-BasedOnStyle: Microsoft
+Standard: Auto
 
-BreakBeforeBraces: Custom
-BraceWrapping:
-  AfterCaseLabel: true
-  AfterUnion: true
-  BeforeWhile: true
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
 
-ColumnLimit: 130
+# Braces - new line style (Allman)
+BreakBeforeBraces: Allman
+
+# Pointer alignment - left side (int* ptr)
 PointerAlignment: Left
-UseTab: Always
-BreakConstructorInitializers: BeforeComma
 
-InsertNewlineAtEOF: true
+# Preprocessor directives - indent nested defines
+IndentPPDirectives: BeforeHash
+PPIndentWidth: 4
+
+# Function and control flow formatting
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+
+# Spacing
+SpaceAfterCStyleCast: true
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpaceBeforeAssignmentOperators: true
+
+# Line breaks and wrapping
+ColumnLimit: 140
+AlwaysBreakAfterReturnType: None
+AlwaysBreakBeforeMultilineStrings: false
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+
+# Alignment
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignOperands: true
+AlignTrailingComments: true
+
+# Sorting and includes
+SortIncludes: CaseSensitive
 IncludeBlocks: Regroup
 
-IncludeCategories:
-  - Regex:           '^"(warcry\/)'
-    Priority:        2
-  - Regex:           '^<.*'
-    Priority:        3
-  - Regex:           '^".*'
-    Priority:        1
+# Comments
+ReflowComments: true
 
-IndentExternBlock: NoIndent
+# Switch statements
 IndentCaseLabels: true
-IndentAccessModifiers: false
-AccessModifierOffset: -4
+
+# Empty lines
+MaxEmptyLinesToKeep: 2
+KeepEmptyLinesAtTheStartOfBlocks: false
+
+# Penalties (for line breaking decisions)
+PenaltyBreakAssignment: 200
+PenaltyBreakBeforeFirstCallParameter: 100
+PenaltyBreakComment: 300
+PenaltyBreakFirstLessLess: 120
+PenaltyBreakString: 1000
+PenaltyExcessCharacter: 1000000
